@@ -647,6 +647,7 @@ int main() {
     printf("4. loadMNISTImages was updated to use CUDA Malloc Host which in turn reduced the CPU time we cannot see much increase in the speed up.\n");
     
     freeNetwork(net_cpu);
+    
     freeNetwork(net_gpu);
     freeMatrix(train_images, 60000);
     freeMatrix(train_labels, 60000);
