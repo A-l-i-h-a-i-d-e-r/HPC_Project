@@ -642,7 +642,6 @@ int main() {
     printf("6. Asynchronous Transfers with Variable Streams: Used %d CUDA streams to overlap data transfers (batch images, labels, and outputs) with computation, processing one batch while transferring another.\n", config.num_streams);
     printf("\n");
 
-
     Real** train_images = loadMNISTImages("data/train-images-idx3-ubyte/train-images-idx3-ubyte", 60000);
     Real** train_labels = loadMNISTLabels("data/train-labels-idx1-ubyte/train-labels-idx1-ubyte", 60000);
     Real** test_images = loadMNISTImages("data/t10k-images-idx3-ubyte/t10k-images-idx3-ubyte", 10000);
