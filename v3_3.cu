@@ -605,7 +605,7 @@ int main() {
     printf("1. Pinned Host Memory: Used cudaMallocHost for host-side allocations (temp_W1, temp_W2) to enable faster device to host memory transfers.\n");
     printf("2. Reused Allocated Memory: Allocated d_hidden, d_output, d_d_output, and d_d_hidden once at the start of training and evaluation, reusing them across iterations and epochs, and freeing them only when complete.\n");
     printf("3. Asynchronous Transfers with Variable Streams: Used %d CUDA streams to overlap data transfers (batch images, labels, and outputs) with computation, processing one batch while transferring another.\n", NUM_STREAMS);
-    printf("4. loadMNISTImages was updated to use CUDA Malloc Host which in turn reduced the CPU time we cannot see much increase in the speed up.\n");
+    // printf("4. loadMNISTImages was updated to use CUDA Malloc Host which in turn reduced the CPU time we cannot see much increase in the speed up.\n");
     
     freeNetwork(net_cpu);
     
