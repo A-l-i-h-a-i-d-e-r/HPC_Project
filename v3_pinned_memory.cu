@@ -31,21 +31,36 @@ float get_gpu_time(cudaEvent_t start, cudaEvent_t stop) {
     return milliseconds / 1000.0;
 }
 
+// double** allocateMatrix(int rows, int cols) {
+//     double** mat = (double**)malloc(rows * sizeof(double*));
+//     for (int i = 0; i < rows; i++) {
+//         mat[i] = (double*)malloc(cols * sizeof(double));
+//     }
+//     return mat;
+// }
+
 double** allocateMatrix(int rows, int cols) {
-    double** mat = (double**)malloc(rows * sizeof(double*));
+    double** mat;
+    CUDA_CHECK(cudaMallocHost(&mat, rows * sizeof(double*)));
     for (int i = 0; i < rows; i++) {
-        mat[i] = (double*)malloc(cols * sizeof(double));
+        CUDA_CHECK(cudaMallocHost(&mat[i], cols * sizeof(double)));
     }
     return mat;
 }
 
+// void freeMatrix(double** mat, int rows) {
+//     for (int i = 0; i < rows; i++) {
+//         free(mat[i]);
+//     }
+//     free(mat);
+// }
+
 void freeMatrix(double** mat, int rows) {
     for (int i = 0; i < rows; i++) {
-        free(mat[i]);
+        CUDA_CHECK(cudaFreeHost(mat[i]));
     }
-    free(mat);
+    CUDA_CHECK(cudaFreeHost(mat));
 }
-
 
 void relu_cpu(double* x, int size) {
     for (int i = 0; i < size; i++) {
@@ -509,6 +524,29 @@ void evaluate(NeuralNetwork* net, double** images, double** labels, int numImage
     printf("%s Test Accuracy: %.2f%%\n", use_gpu ? "GPU" : "CPU", *test_acc_out);
 }
 
+// double** loadMNISTImages(const char* filename, int numImages) {
+//     FILE* file = fopen(filename, "rb");
+//     if (!file) {
+//         printf("Error opening %s\n", filename);
+//         exit(1);
+//     }
+//     fseek(file, 16, SEEK_SET);
+//     double** images = allocateMatrix(numImages, INPUT_SIZE);
+//     for (int i = 0; i < numImages; i++) {
+//         for (int j = 0; j < INPUT_SIZE; j++) {
+//             unsigned char pixel;
+//             if (fread(&pixel, sizeof(unsigned char), 1, file) != 1) {
+//                 fprintf(stderr, "Error: Failed to read pixel\n");
+//                 fclose(file);
+//                 exit(EXIT_FAILURE);
+//             }
+//             images[i][j] = pixel / 255.0;
+//         }
+//     }
+//     fclose(file);
+//     return images;
+// }
+
 double** loadMNISTImages(const char* filename, int numImages) {
     FILE* file = fopen(filename, "rb");
     if (!file) {
@@ -523,6 +561,7 @@ double** loadMNISTImages(const char* filename, int numImages) {
             if (fread(&pixel, sizeof(unsigned char), 1, file) != 1) {
                 fprintf(stderr, "Error: Failed to read pixel\n");
                 fclose(file);
+                freeMatrix(images, numImages);
                 exit(EXIT_FAILURE);
             }
             images[i][j] = pixel / 255.0;
