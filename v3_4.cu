@@ -614,10 +614,10 @@
 // int main() {
 //     printf("MNIST Neural Network - V5 (Fixed Numerical Stability and Memory Access)\n\n");
 
-//     double** train_images = loadMNISTImages("data/train-images-idx3-ubyte/train-images-idx3-ubyte", 60000);
-//     double** train_labels = loadMNISTLabels("data/train-labels-idx1-ubyte/train-labels-idx1-ubyte", 60000);
-//     double** test_images = loadMNISTImages("data/t10k-images-idx3-ubyte/t10k-images-idx3-ubyte", 10000);
-//     double** test_labels = loadMNISTLabels("data/t10k-labels-idx1-ubyte/t10k-labels-idx1-ubyte", 10000);
+//     double** train_images = loadMNISTImages("/home/bscs-22i-1210/snap/snapd-desktop-integration/current/Desktop/project-root_HPC/data/train-images-idx3-ubyte/train-images-idx3-ubyte", 60000);
+//     double** train_labels = loadMNISTLabels("/home/bscs-22i-1210/snap/snapd-desktop-integration/current/Desktop/project-root_HPC/data/train-labels-idx1-ubyte/train-labels-idx1-ubyte", 60000);
+//     double** test_images = loadMNISTImages("/home/bscs-22i-1210/snap/snapd-desktop-integration/current/Desktop/project-root_HPC/data/t10k-images-idx3-ubyte/t10k-images-idx3-ubyte", 10000);
+//     double** test_labels = loadMNISTLabels("/home/bscs-22i-1210/snap/snapd-desktop-integration/current/Desktop/project-root_HPC/data/t10k-labels-idx1-ubyte/t10k-labels-idx1-ubyte", 10000);
 
 //     NeuralNetwork* net_cpu = createNetwork();
 //     double cpu_total_time, cpu_loss, cpu_train_acc, cpu_test_acc;

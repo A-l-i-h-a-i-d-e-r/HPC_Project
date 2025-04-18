@@ -1146,3 +1146,2667 @@ v3_1
 
 //     return 0;
 // }
+
+v3_4:
+
+// #include <stdio.h>
+// #include <stdlib.h>
+// #include <math.h>
+// #include <time.h>
+// #include <cuda_runtime.h>
+
+// #define INPUT_SIZE 784
+// #define HIDDEN_SIZE 128
+// #define OUTPUT_SIZE 10
+// #define LEARNING_RATE 0.01
+// #define EPOCHS 3
+// #define BATCH_SIZE 64
+// #define NUM_CLASSES 10
+// #define NUM_STREAMS 3
+// #define TILE_SIZE 16
+
+// #define CUDA_CHECK(err) do { \
+//     if (err != cudaSuccess) { \
+//         fprintf(stderr, "CUDA error: %s at line %d\n", cudaGetErrorString(err), __LINE__); \
+//         exit(EXIT_FAILURE); \
+//     } \
+// } while(0)
+
+// double get_cpu_time(clock_t start) {
+//     return (double)(clock() - start) / CLOCKS_PER_SEC;
+// }
+
+// float get_gpu_time(cudaEvent_t start, cudaEvent_t stop) {
+//     float milliseconds = 0;
+//     CUDA_CHECK(cudaEventSynchronize(stop));
+//     CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+//     return milliseconds / 1000.0;
+// }
+
+// double** allocateMatrix(int rows, int cols) {
+//     double** mat = (double**)malloc(rows * sizeof(double*));
+//     if (!mat) {
+//         fprintf(stderr, "Failed to allocate matrix rows\n");
+//         exit(EXIT_FAILURE);
+//     }
+//     for (int i = 0; i < rows; i++) {
+//         mat[i] = (double*)malloc(cols * sizeof(double));
+//         if (!mat[i]) {
+//             fprintf(stderr, "Failed to allocate matrix row %d\n", i);
+//             exit(EXIT_FAILURE);
+//         }
+//     }
+//     return mat;
+// }
+
+// void freeMatrix(double** mat, int rows) {
+//     for (int i = 0; i < rows; i++) {
+//         free(mat[i]);
+//     }
+//     free(mat);
+// }
+
+// void relu_cpu(double* x, int size) {
+//     for (int i = 0; i < size; i++) {
+//         x[i] = (x[i] > 0) ? x[i] : 0;
+//     }
+// }
+
+// void softmax_cpu(double* x, int size) {
+//     double max = x[0];
+//     for (int i = 1; i < size; i++) {
+//         if (x[i] > max) max = x[i];
+//     }
+//     double sum = 0;
+//     for (int i = 0; i < size; i++) {
+//         x[i] = exp(x[i] - max);
+//         sum += x[i];
+//     }
+//     for (int i = 0; i < size; i++) {
+//         x[i] = (sum > 0) ? (x[i] / sum) : (1.0 / size);
+//     }
+// }
+
+// __global__ void matrixMulKernel(double* A, double* B, double* C, double* bias, int rowsA, int colsA, int colsB) {
+//     __shared__ double tileA[TILE_SIZE][TILE_SIZE];
+//     __shared__ double tileB[TILE_SIZE][1]; // Optimized for colsB=1
+//     int row = blockIdx.y * TILE_SIZE + threadIdx.y;
+//     int col = blockIdx.x * TILE_SIZE + threadIdx.x;
+//     double sum = 0.0;
+//     for (int t = 0; t < (colsA + TILE_SIZE - 1) / TILE_SIZE; t++) {
+//         int aCol = t * TILE_SIZE + threadIdx.x;
+//         if (row < rowsA && aCol < colsA) {
+//             tileA[threadIdx.y][threadIdx.x] = A[row * colsA + aCol];
+//         } else {
+//             tileA[threadIdx.y][threadIdx.x] = 0.0;
+//         }
+//         int bRow = t * TILE_SIZE + threadIdx.y;
+//         if (bRow < colsA && col < colsB && threadIdx.x == 0) { // Only one thread per row loads
+//             tileB[threadIdx.y][0] = B[bRow * colsB + col];
+//         } else {
+//             tileB[threadIdx.y][0] = 0.0;
+//         }
+//         __syncthreads();
+//         if (row < rowsA && col < colsB) {
+//             for (int k = 0; k < TILE_SIZE; k++) {
+//                 sum += tileA[threadIdx.y][k] * tileB[k][0];
+//             }
+//         }
+//         __syncthreads();
+//     }
+//     if (row < rowsA && col < colsB) {
+//         C[row * colsB + col] = sum + bias[row];
+//     }
+// }
+
+// __global__ void reluKernel(double* x, int size) {
+//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (idx < size) {
+//         x[idx] = (x[idx] > 0) ? x[idx] : 0;
+//     }
+// }
+
+// __global__ void softmaxKernel(double* x, int size) {
+//     extern __shared__ double shared[];
+//     double* max_val = shared;
+//     double* sum_val = &shared[blockDim.x];
+//     int idx = threadIdx.x;
+//     double local_max = idx < size ? x[idx] : -INFINITY;
+//     max_val[idx] = local_max;
+//     __syncthreads();
+//     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+//         if (idx < stride && idx + stride < blockDim.x) {
+//             max_val[idx] = fmax(max_val[idx], max_val[idx + stride]);
+//         }
+//         __syncthreads();
+//     }
+//     double global_max = max_val[0];
+//     double local_exp = idx < size ? exp(x[idx] - global_max) : 0.0;
+//     sum_val[idx] = local_exp;
+//     __syncthreads();
+//     for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+//         if (idx < stride && idx + stride < blockDim.x) {
+//             sum_val[idx] += sum_val[idx + stride];
+//         }
+//         __syncthreads();
+//     }
+//     double global_sum = sum_val[0];
+//     if (idx < size) {
+//         x[idx] = (global_sum > 0) ? (local_exp / global_sum) : (1.0 / size);
+//         x[idx] = fmax(x[idx], 1e-10); // Prevent log(0)
+//     }
+// }
+
+// __global__ void outputGradientKernel(double* output, double* target, double* d_output, int size) {
+//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (idx < size) {
+//         d_output[idx] = output[idx] - target[idx];
+//     }
+// }
+
+// __global__ void hiddenGradientKernel(double* W2, double* d_output, double* hidden, double* d_hidden, int hidden_size, int output_size) {
+//     int i = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (i < hidden_size) {
+//         double sum = 0;
+//         for (int j = 0; j < output_size; j++) {
+//             sum += W2[j * hidden_size + i] * d_output[j];
+//         }
+//         d_hidden[i] = sum * (hidden[i] > 0);
+//     }
+// }
+
+// __global__ void updateWeightsKernel(double* W, double* grad, double* input, int rows, int cols, double lr) {
+//     int i = blockIdx.y * blockDim.y + threadIdx.y;
+//     int j = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (i < rows && j < cols) {
+//         W[i * cols + j] -= lr * grad[i] * input[j];
+//     }
+// }
+
+// __global__ void updateBiasKernel(double* b, double* grad, int size, double lr) {
+//     int i = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (i < size) {
+//         b[i] -= lr * grad[i];
+//     }
+// }
+
+// typedef struct {
+//     double** W1;
+//     double** W2;
+//     double* b1;
+//     double* b2;
+//     double *d_W1, *d_W2, *d_b1, *d_b2;
+// } NeuralNetwork;
+
+// NeuralNetwork* createNetwork() {
+//     NeuralNetwork* net = (NeuralNetwork*)malloc(sizeof(NeuralNetwork));
+//     if (!net) {
+//         fprintf(stderr, "Failed to allocate NeuralNetwork\n");
+//         exit(EXIT_FAILURE);
+//     }
+//     net->W1 = allocateMatrix(HIDDEN_SIZE, INPUT_SIZE);
+//     net->W2 = allocateMatrix(OUTPUT_SIZE, HIDDEN_SIZE);
+//     net->b1 = (double*)calloc(HIDDEN_SIZE, sizeof(double));
+//     net->b2 = (double*)calloc(OUTPUT_SIZE, sizeof(double));
+//     if (!net->b1 || !net->b2) {
+//         fprintf(stderr, "Failed to allocate biases\n");
+//         exit(EXIT_FAILURE);
+//     }
+
+//     srand(42);
+//     for (int i = 0; i < HIDDEN_SIZE; i++)
+//         for (int j = 0; j < INPUT_SIZE; j++)
+//             net->W1[i][j] = ((double)rand() / RAND_MAX - 0.5) * 0.02; // Adjusted range
+//     for (int i = 0; i < OUTPUT_SIZE; i++)
+//         for (int j = 0; j < HIDDEN_SIZE; j++)
+//             net->W2[i][j] = ((double)rand() / RAND_MAX - 0.5) * 0.02;
+
+//     CUDA_CHECK(cudaMalloc(&net->d_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double)));
+//     CUDA_CHECK(cudaMalloc(&net->d_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double)));
+//     CUDA_CHECK(cudaMalloc(&net->d_b1, HIDDEN_SIZE * sizeof(double)));
+//     CUDA_CHECK(cudaMalloc(&net->d_b2, OUTPUT_SIZE * sizeof(double)));
+
+//     double* temp_W1 = (double*)malloc(HIDDEN_SIZE * INPUT_SIZE * sizeof(double));
+//     double* temp_W2 = (double*)malloc(OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double));
+//     if (!temp_W1 || !temp_W2) {
+//         fprintf(stderr, "Failed to allocate temporary weight arrays\n");
+//         exit(EXIT_FAILURE);
+//     }
+//     for (int i = 0; i < HIDDEN_SIZE; i++)
+//         for (int j = 0; j < INPUT_SIZE; j++)
+//             temp_W1[i * INPUT_SIZE + j] = net->W1[i][j];
+//     for (int i = 0; i < OUTPUT_SIZE; i++)
+//         for (int j = 0; j < HIDDEN_SIZE; j++)
+//             temp_W2[i * HIDDEN_SIZE + j] = net->W2[i][j];
+
+//     CUDA_CHECK(cudaMemcpy(net->d_W1, temp_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice));
+//     CUDA_CHECK(cudaMemcpy(net->d_W2, temp_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice));
+//     CUDA_CHECK(cudaMemcpy(net->d_b1, net->b1, HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice));
+//     CUDA_CHECK(cudaMemcpy(net->d_b2, net->b2, OUTPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice));
+
+//     free(temp_W1);
+//     free(temp_W2);
+//     return net;
+// }
+
+// void forward_cpu(NeuralNetwork* net, double* input, double* hidden, double* output) {
+//     for (int i = 0; i < HIDDEN_SIZE; i++) {
+//         hidden[i] = net->b1[i];
+//         for (int j = 0; j < INPUT_SIZE; j++)
+//             hidden[i] += net->W1[i][j] * input[j];
+//     }
+//     relu_cpu(hidden, HIDDEN_SIZE);
+//     for (int i = 0; i < OUTPUT_SIZE; i++) {
+//         output[i] = net->b2[i];
+//         for (int j = 0; j < HIDDEN_SIZE; j++)
+//             output[i] += net->W2[i][j] * hidden[j];
+//     }
+//     softmax_cpu(output, OUTPUT_SIZE);
+// }
+
+// void forward_gpu(NeuralNetwork* net, double* d_input, double* d_hidden, double* d_output, cudaStream_t stream) {
+//     dim3 blockDim(TILE_SIZE, TILE_SIZE);
+//     dim3 gridDim((1 + TILE_SIZE - 1) / TILE_SIZE, (HIDDEN_SIZE + TILE_SIZE - 1) / TILE_SIZE);
+//     matrixMulKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W1, d_input, d_hidden, net->d_b1, HIDDEN_SIZE, INPUT_SIZE, 1);
+//     int threads = 256;
+//     int blocks = (HIDDEN_SIZE + threads - 1) / threads;
+//     reluKernel<<<blocks, threads, 0, stream>>>(d_hidden, HIDDEN_SIZE);
+//     gridDim = dim3((1 + TILE_SIZE - 1) / TILE_SIZE, (OUTPUT_SIZE + TILE_SIZE - 1) / TILE_SIZE);
+//     matrixMulKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W2, d_hidden, d_output, net->d_b2, OUTPUT_SIZE, HIDDEN_SIZE, 1);
+//     softmaxKernel<<<1, 32, 32 * sizeof(double) * 2, stream>>>(d_output, OUTPUT_SIZE);
+// }
+
+// void backward_cpu(NeuralNetwork* net, double* input, double* hidden, double* output, double* target) {
+//     double d_output[OUTPUT_SIZE], d_hidden[HIDDEN_SIZE];
+//     for (int i = 0; i < OUTPUT_SIZE; i++)
+//         d_output[i] = output[i] - target[i];
+//     for (int i = 0; i < HIDDEN_SIZE; i++) {
+//         d_hidden[i] = 0;
+//         for (int j = 0; j < OUTPUT_SIZE; j++)
+//             d_hidden[i] += net->W2[j][i] * d_output[j];
+//         d_hidden[i] *= (hidden[i] > 0);
+//     }
+//     for (int i = 0; i < OUTPUT_SIZE; i++)
+//         for (int j = 0; j < HIDDEN_SIZE; j++)
+//             net->W2[i][j] -= LEARNING_RATE * d_output[i] * hidden[j];
+//     for (int i = 0; i < HIDDEN_SIZE; i++)
+//         for (int j = 0; j < INPUT_SIZE; j++)
+//             net->W1[i][j] -= LEARNING_RATE * d_hidden[i] * input[j];
+//     for (int i = 0; i < OUTPUT_SIZE; i++)
+//         net->b2[i] -= LEARNING_RATE * d_output[i];
+//     for (int i = 0; i < HIDDEN_SIZE; i++)
+//         net->b1[i] -= LEARNING_RATE * d_hidden[i];
+// }
+
+// void backward_gpu(NeuralNetwork* net, double* d_input, double* d_hidden, double* d_output, double* d_target, double* d_d_output, double* d_d_hidden, cudaStream_t stream) {
+//     int threads = 256;
+//     int blocks = (OUTPUT_SIZE + threads - 1) / threads;
+//     outputGradientKernel<<<blocks, threads, 0, stream>>>(d_output, d_target, d_d_output, OUTPUT_SIZE);
+//     blocks = (HIDDEN_SIZE + threads - 1) / threads;
+//     hiddenGradientKernel<<<blocks, threads, 0, stream>>>(net->d_W2, d_d_output, d_hidden, d_d_hidden, HIDDEN_SIZE, OUTPUT_SIZE);
+//     dim3 blockDim(16, 16);
+//     dim3 gridDim((HIDDEN_SIZE + 15) / 16, (OUTPUT_SIZE + 15) / 16);
+//     updateWeightsKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W2, d_d_output, d_hidden, OUTPUT_SIZE, HIDDEN_SIZE, LEARNING_RATE);
+//     gridDim = dim3((INPUT_SIZE + 15) / 16, (HIDDEN_SIZE + 15) / 16);
+//     updateWeightsKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W1, d_d_hidden, d_input, HIDDEN_SIZE, INPUT_SIZE, LEARNING_RATE);
+//     blocks = (OUTPUT_SIZE + threads - 1) / threads;
+//     updateBiasKernel<<<blocks, threads, 0, stream>>>(net->d_b2, d_d_output, OUTPUT_SIZE, LEARNING_RATE);
+//     blocks = (HIDDEN_SIZE + threads - 1) / threads;
+//     updateBiasKernel<<<blocks, threads, 0, stream>>>(net->d_b1, d_d_hidden, HIDDEN_SIZE, LEARNING_RATE);
+// }
+
+// void train(NeuralNetwork* net, double** images, double** labels, int numImages, bool use_gpu, double* total_time, double* loss_out, double* train_acc_out) {
+//     double loss = 0.0;
+//     int correct = 0;
+
+//     if (use_gpu) {
+//         double *d_hidden, *d_output, *d_d_output, *d_d_hidden;
+//         CUDA_CHECK(cudaMalloc(&d_hidden, HIDDEN_SIZE * sizeof(double)));
+//         CUDA_CHECK(cudaMalloc(&d_output, OUTPUT_SIZE * sizeof(double)));
+//         CUDA_CHECK(cudaMalloc(&d_d_output, OUTPUT_SIZE * sizeof(double)));
+//         CUDA_CHECK(cudaMalloc(&d_d_hidden, HIDDEN_SIZE * sizeof(double)));
+
+//         double *d_batch_images[NUM_STREAMS], *d_batch_labels[NUM_STREAMS], *d_batch_outputs[NUM_STREAMS];
+//         cudaStream_t streams[NUM_STREAMS];
+//         for (int s = 0; s < NUM_STREAMS; s++) {
+//             CUDA_CHECK(cudaMalloc(&d_batch_images[s], BATCH_SIZE * INPUT_SIZE * sizeof(double)));
+//             CUDA_CHECK(cudaMalloc(&d_batch_labels[s], BATCH_SIZE * OUTPUT_SIZE * sizeof(double)));
+//             CUDA_CHECK(cudaMalloc(&d_batch_outputs[s], BATCH_SIZE * OUTPUT_SIZE * sizeof(double)));
+//             CUDA_CHECK(cudaStreamCreate(&streams[s]));
+//         }
+
+//         double* batch_outputs = (double*)malloc(BATCH_SIZE * OUTPUT_SIZE * sizeof(double));
+//         double* temp_W1 = (double*)malloc(HIDDEN_SIZE * INPUT_SIZE * sizeof(double));
+//         double* temp_W2 = (double*)malloc(OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double));
+//         if (!batch_outputs || !temp_W1 || !temp_W2) {
+//             fprintf(stderr, "Failed to allocate host output/weight arrays\n");
+//             exit(EXIT_FAILURE);
+//         }
+
+//         cudaEvent_t start, stop;
+//         CUDA_CHECK(cudaEventCreate(&start));
+//         CUDA_CHECK(cudaEventCreate(&stop));
+//         CUDA_CHECK(cudaEventRecord(start));
+
+//         for (int epoch = 0; epoch < EPOCHS; epoch++) {
+//             loss = 0.0;
+//             correct = 0;
+
+//             for (int i = 0; i < numImages; i += BATCH_SIZE) {
+//                 int stream_idx = (i / BATCH_SIZE) % NUM_STREAMS;
+//                 cudaStream_t stream = streams[stream_idx];
+//                 int batch_size = (i + BATCH_SIZE <= numImages) ? BATCH_SIZE : numImages - i;
+
+//                 for (int b = 0; b < batch_size; b++) {
+//                     int img_idx = i + b;
+//                     CUDA_CHECK(cudaMemcpyAsync(d_batch_images[stream_idx] + b * INPUT_SIZE,
+//                                                images[img_idx],
+//                                                INPUT_SIZE * sizeof(double),
+//                                                cudaMemcpyHostToDevice,
+//                                                stream));
+//                     CUDA_CHECK(cudaMemcpyAsync(d_batch_labels[stream_idx] + b * OUTPUT_SIZE,
+//                                                labels[img_idx],
+//                                                OUTPUT_SIZE * sizeof(double),
+//                                                cudaMemcpyHostToDevice,
+//                                                stream));
+//                 }
+
+//                 for (int b = 0; b < batch_size; b++) {
+//                     double* d_input = d_batch_images[stream_idx] + b * INPUT_SIZE;
+//                     double* d_target = d_batch_labels[stream_idx] + b * OUTPUT_SIZE;
+//                     double* d_batch_output = d_batch_outputs[stream_idx] + b * OUTPUT_SIZE;
+
+//                     forward_gpu(net, d_input, d_hidden, d_output, stream);
+//                     backward_gpu(net, d_input, d_hidden, d_output, d_target, d_d_output, d_d_hidden, stream);
+
+//                     CUDA_CHECK(cudaMemcpyAsync(d_batch_output, d_output, OUTPUT_SIZE * sizeof(double),
+//                                                cudaMemcpyDeviceToDevice, stream));
+//                 }
+
+//                 CUDA_CHECK(cudaMemcpyAsync(batch_outputs, d_batch_outputs[stream_idx],
+//                                            batch_size * OUTPUT_SIZE * sizeof(double),
+//                                            cudaMemcpyDeviceToHost, stream));
+
+//                 CUDA_CHECK(cudaStreamSynchronize(stream));
+
+//                 for (int b = 0; b < batch_size; b++) {
+//                     int img_idx = i + b;
+//                     for (int k = 0; k < OUTPUT_SIZE; k++) {
+//                         double val = batch_outputs[b * OUTPUT_SIZE + k];
+//                         loss -= labels[img_idx][k] * log(fmax(val, 1e-10));
+//                     }
+//                     int pred = 0, actual = 0;
+//                     for (int j = 0; j < OUTPUT_SIZE; j++) {
+//                         if (batch_outputs[b * OUTPUT_SIZE + j] > batch_outputs[b * OUTPUT_SIZE + pred]) pred = j;
+//                         if (labels[img_idx][j] > labels[img_idx][actual]) actual = j;
+//                     }
+//                     if (pred == actual) correct++;
+//                 }
+//             }
+
+//             CUDA_CHECK(cudaDeviceSynchronize());
+//             printf("GPU Epoch %d - Loss: %.4f - Train Accuracy: %.2f%%\n",
+//                    epoch + 1, loss / numImages, (correct / (double)numImages) * 100);
+//             if (epoch == EPOCHS - 1) {
+//                 *loss_out = loss / numImages;
+//                 *train_acc_out = (correct / (double)numImages) * 100;
+//             }
+//         }
+
+//         CUDA_CHECK(cudaMemcpy(temp_W1, net->d_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost));
+//         CUDA_CHECK(cudaMemcpy(temp_W2, net->d_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double), cudaMemcpyDeviceToHost));
+//         CUDA_CHECK(cudaMemcpy(net->b1, net->d_b1, HIDDEN_SIZE * sizeof(double), cudaMemcpyDeviceToHost));
+//         CUDA_CHECK(cudaMemcpy(net->b2, net->d_b2, OUTPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost));
+
+//         for (int i = 0; i < HIDDEN_SIZE; i++)
+//             for (int j = 0; j < INPUT_SIZE; j++)
+//                 net->W1[i][j] = temp_W1[i * INPUT_SIZE + j];
+//         for (int i = 0; i < OUTPUT_SIZE; i++)
+//             for (int j = 0; j < HIDDEN_SIZE; j++)
+//                 net->W2[i][j] = temp_W2[i * HIDDEN_SIZE + j];
+
+//         CUDA_CHECK(cudaEventRecord(stop));
+//         CUDA_CHECK(cudaEventSynchronize(stop));
+//         *total_time = get_gpu_time(start, stop);
+
+//         CUDA_CHECK(cudaEventDestroy(start));
+//         CUDA_CHECK(cudaEventDestroy(stop));
+//         free(batch_outputs);
+//         free(temp_W1);
+//         free(temp_W2);
+//         for (int s = 0; s < NUM_STREAMS; s++) {
+//             CUDA_CHECK(cudaFree(d_batch_images[s]));
+//             CUDA_CHECK(cudaFree(d_batch_labels[s]));
+//             CUDA_CHECK(cudaFree(d_batch_outputs[s]));
+//             CUDA_CHECK(cudaStreamDestroy(streams[s]));
+//         }
+//         CUDA_CHECK(cudaFree(d_hidden));
+//         CUDA_CHECK(cudaFree(d_output));
+//         CUDA_CHECK(cudaFree(d_d_output));
+//         CUDA_CHECK(cudaFree(d_d_hidden));
+//     } else {
+//         clock_t total_start = clock();
+//         for (int epoch = 0; epoch < EPOCHS; epoch++) {
+//             loss = 0.0;
+//             correct = 0;
+//             for (int i = 0; i < numImages; i++) {
+//                 double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
+//                 forward_cpu(net, images[i], hidden, output);
+//                 backward_cpu(net, images[i], hidden, output, labels[i]);
+//                 for (int k = 0; k < OUTPUT_SIZE; k++) {
+//                     loss -= labels[i][k] * log(fmax(output[k], 1e-10));
+//                 }
+//                 int pred = 0, actual = 0;
+//                 for (int j = 0; j < OUTPUT_SIZE; j++) {
+//                     if (output[j] > output[pred]) pred = j;
+//                     if (labels[i][j] > labels[i][actual]) actual = j;
+//                 }
+//                 if (pred == actual) correct++;
+//             }
+//             printf("CPU Epoch %d - Loss: %.4f - Train Accuracy: %.2f%%\n",
+//                    epoch + 1, loss / numImages, (correct / (double)numImages) * 100);
+//             if (epoch == EPOCHS - 1) {
+//                 *loss_out = loss / numImages;
+//                 *train_acc_out = (correct / (double)numImages) * 100;
+//             }
+//         }
+//         *total_time = get_cpu_time(total_start);
+//         printf("CPU Total training time: %.3fs\n", *total_time);
+//     }
+// }
+
+// void evaluate(NeuralNetwork* net, double** images, double** labels, int numImages, bool use_gpu, double* test_acc_out) {
+//     int correct = 0;
+//     if (use_gpu) {
+//         double *d_hidden, *d_output;
+//         CUDA_CHECK(cudaMalloc(&d_hidden, HIDDEN_SIZE * sizeof(double)));
+//         CUDA_CHECK(cudaMalloc(&d_output, OUTPUT_SIZE * sizeof(double)));
+
+//         double *d_batch_images[NUM_STREAMS], *d_batch_outputs[NUM_STREAMS];
+//         cudaStream_t streams[NUM_STREAMS];
+//         for (int s = 0; s < NUM_STREAMS; s++) {
+//             CUDA_CHECK(cudaMalloc(&d_batch_images[s], BATCH_SIZE * INPUT_SIZE * sizeof(double)));
+//             CUDA_CHECK(cudaMalloc(&d_batch_outputs[s], BATCH_SIZE * OUTPUT_SIZE * sizeof(double)));
+//             CUDA_CHECK(cudaStreamCreate(&streams[s]));
+//         }
+
+//         double* batch_outputs = (double*)malloc(BATCH_SIZE * OUTPUT_SIZE * sizeof(double));
+//         if (!batch_outputs) {
+//             fprintf(stderr, "Failed to allocate batch_outputs in evaluate\n");
+//             exit(EXIT_FAILURE);
+//         }
+
+//         for (int i = 0; i < numImages; i += BATCH_SIZE) {
+//             int stream_idx = (i / BATCH_SIZE) % NUM_STREAMS;
+//             cudaStream_t stream = streams[stream_idx];
+//             int batch_size = (i + BATCH_SIZE <= numImages) ? BATCH_SIZE : numImages - i;
+
+//             for (int b = 0; b < batch_size; b++) {
+//                 int img_idx = i + b;
+//                 CUDA_CHECK(cudaMemcpyAsync(d_batch_images[stream_idx] + b * INPUT_SIZE,
+//                                            images[img_idx],
+//                                            INPUT_SIZE * sizeof(double),
+//                                            cudaMemcpyHostToDevice,
+//                                            stream));
+//             }
+
+//             for (int b = 0; b < batch_size; b++) {
+//                 double* d_input = d_batch_images[stream_idx] + b * INPUT_SIZE;
+//                 double* d_batch_output = d_batch_outputs[stream_idx] + b * OUTPUT_SIZE;
+//                 forward_gpu(net, d_input, d_hidden, d_output, stream);
+//                 CUDA_CHECK(cudaMemcpyAsync(d_batch_output, d_output, OUTPUT_SIZE * sizeof(double),
+//                                            cudaMemcpyDeviceToDevice, stream));
+//             }
+
+//             CUDA_CHECK(cudaMemcpyAsync(batch_outputs, d_batch_outputs[stream_idx],
+//                                        batch_size * OUTPUT_SIZE * sizeof(double),
+//                                        cudaMemcpyDeviceToHost, stream));
+
+//             CUDA_CHECK(cudaStreamSynchronize(stream));
+
+//             for (int b = 0; b < batch_size; b++) {
+//                 int img_idx = i + b;
+//                 int pred = 0, actual = 0;
+//                 for (int j = 0; j < OUTPUT_SIZE; j++) {
+//                     if (batch_outputs[b * OUTPUT_SIZE + j] > batch_outputs[b * OUTPUT_SIZE + pred]) pred = j;
+//                     if (labels[img_idx][j] > labels[img_idx][actual]) actual = j;
+//                 }
+//                 if (pred == actual) correct++;
+//             }
+//         }
+
+//         free(batch_outputs);
+//         for (int s = 0; s < NUM_STREAMS; s++) {
+//             CUDA_CHECK(cudaFree(d_batch_images[s]));
+//             CUDA_CHECK(cudaFree(d_batch_outputs[s]));
+//             CUDA_CHECK(cudaStreamDestroy(streams[s]));
+//         }
+//         CUDA_CHECK(cudaFree(d_hidden));
+//         CUDA_CHECK(cudaFree(d_output));
+//     } else {
+//         for (int i = 0; i < numImages; i++) {
+//             double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
+//             forward_cpu(net, images[i], hidden, output);
+//             int pred = 0, actual = 0;
+//             for (int j = 0; j < OUTPUT_SIZE; j++) {
+//                 if (output[j] > output[pred]) pred = j;
+//                 if (labels[i][j] > labels[i][actual]) actual = j;
+//             }
+//             if (pred == actual) correct++;
+//         }
+//     }
+//     *test_acc_out = (correct / (double)numImages) * 100;
+//     printf("%s Test Accuracy: %.2f%%\n", use_gpu ? "CPU" : "GPU", *test_acc_out);
+// }
+
+// double** loadMNISTImages(const char* filename, int numImages) {
+//     FILE* file = fopen(filename, "rb");
+//     if (!file) {
+//         fprintf(stderr, "Error opening %s\n", filename);
+//         exit(EXIT_FAILURE);
+//     }
+//     fseek(file, 16, SEEK_SET);
+//     double** images = allocateMatrix(numImages, INPUT_SIZE);
+//     for (int i = 0; i < numImages; i++) {
+//         for (int j = 0; j < INPUT_SIZE; j++) {
+//             unsigned char pixel;
+//             if (fread(&pixel, sizeof(unsigned char), 1, file) != 1) {
+//                 fprintf(stderr, "Error: Failed to read pixel at image %d, pixel %d\n", i, j);
+//                 fclose(file);
+//                 exit(EXIT_FAILURE);
+//             }
+//             images[i][j] = pixel / 255.0;
+//         }
+//     }
+//     fclose(file);
+//     return images;
+// }
+
+// double** loadMNISTLabels(const char* filename, int numLabels) {
+//     FILE* file = fopen(filename, "rb");
+//     if (!file) {
+//         fprintf(stderr, "Error opening %s\n", filename);
+//         exit(EXIT_FAILURE);
+//     }
+//     fseek(file, 8, SEEK_SET);
+//     double** labels = allocateMatrix(numLabels, OUTPUT_SIZE);
+//     for (int i = 0; i < numLabels; i++) {
+//         unsigned char label;
+//         if (fread(&label, sizeof(unsigned char), 1, file) != 1) {
+//             fprintf(stderr, "Error: Failed to read label at index %d\n", i);
+//             fclose(file);
+//             exit(EXIT_FAILURE);
+//         }
+//         if (label >= OUTPUT_SIZE) {
+//             fprintf(stderr, "Invalid label %d at index %d\n", label, i);
+//             fclose(file);
+//             exit(EXIT_FAILURE);
+//         }
+//         for (int j = 0; j < OUTPUT_SIZE; j++) {
+//             labels[i][j] = (j == label) ? 1.0 : 0.0;
+//         }
+//     }
+//     fclose(file);
+//     return labels;
+// }
+
+// void freeNetwork(NeuralNetwork* net) {
+//     freeMatrix(net->W1, HIDDEN_SIZE);
+//     freeMatrix(net->W2, OUTPUT_SIZE);
+//     free(net->b1);
+//     free(net->b2);
+//     CUDA_CHECK(cudaFree(net->d_W1));
+//     CUDA_CHECK(cudaFree(net->d_W2));
+//     CUDA_CHECK(cudaFree(net->d_b1));
+//     CUDA_CHECK(cudaFree(net->d_b2));
+//     free(net);
+// }
+
+// int main() {
+//     printf("MNIST Neural Network - V5 (Fixed Numerical Stability and Memory Access)\n\n");
+
+//     double** train_images = loadMNISTImages("data/train-images-idx3-ubyte/train-images-idx3-ubyte", 60000);
+//     double** train_labels = loadMNISTLabels("data/train-labels-idx1-ubyte/train-labels-idx1-ubyte", 60000);
+//     double** test_images = loadMNISTImages("data/t10k-images-idx3-ubyte/t10k-images-idx3-ubyte", 10000);
+//     double** test_labels = loadMNISTLabels("data/t10k-labels-idx1-ubyte/t10k-labels-idx1-ubyte", 10000);
+
+//     NeuralNetwork* net_cpu = createNetwork();
+//     double cpu_total_time, cpu_loss, cpu_train_acc, cpu_test_acc;
+//     printf("Running CPU implementation...\n");
+//     train(net_cpu, train_images, train_labels, 60000, false, &cpu_total_time, &cpu_loss, &cpu_train_acc);
+//     evaluate(net_cpu, test_images, test_labels, 10000, false, &cpu_test_acc);
+
+//     NeuralNetwork* net_gpu = createNetwork();
+//     double gpu_total_time, gpu_loss, gpu_train_acc, gpu_test_acc;
+//     printf("\nRunning GPU implementation...\n");
+//     train(net_gpu, train_images, train_labels, 60000, true, &gpu_total_time, &gpu_loss, &gpu_train_acc);
+//     evaluate(net_gpu, test_images, test_labels, 10000, true, &gpu_test_acc);
+
+//     printf("\n=== Result Comparison ===\n");
+//     printf("CPU Total Time: %.3fs\n", cpu_total_time);
+//     printf("GPU Total Time: %.3fs\n", gpu_total_time);
+//     printf("Speedup: %.2fx\n", cpu_total_time / gpu_total_time);
+//     printf("CPU Loss: %.4f\n", cpu_loss);
+//     printf("GPU Loss: %.4f\n", gpu_loss);
+//     printf("Loss Difference: %.6f\n", fabs(cpu_loss - gpu_loss));
+//     printf("CPU Train Accuracy: %.2f%%\n", cpu_train_acc);
+//     printf("GPU Train Accuracy: %.2f%%\n", gpu_train_acc);
+//     printf("Train Accuracy Difference: %.2f%%\n", fabs(cpu_train_acc - gpu_train_acc));
+//     printf("CPU Test Accuracy: %.2f%%\n", cpu_test_acc);
+//     printf("GPU Test Accuracy: %.2f%%\n", gpu_test_acc);
+//     printf("Test Accuracy Difference: %.2f%%\n", fabs(cpu_test_acc - gpu_test_acc));
+
+//     printf("\n=== Applied Memory Optimizations ===\n");
+//     printf("1. Reused Allocated Memory: Allocated d_hidden, d_output, d_d_output, and d_d_hidden once at the start of training and evaluation, reusing them across iterations and epochs.\n");
+//     printf("2. Asynchronous Transfers with Variable Streams: Used %d CUDA streams to overlap data transfers with computation.\n", NUM_STREAMS);
+//     printf("3. Shared Memory Tiling in matrixMulKernel: Optimized matrix multiplications using %dx%d tiles in shared memory to reduce global memory accesses.\n", TILE_SIZE, TILE_SIZE);
+//     printf("4. Direct Data Copy: Eliminated pinned host memory allocations and copied batch data directly from input arrays to device buffers.\n");
+//     printf("5. Numerical Stability: Fixed softmaxKernel with parallel reduction and added checks to prevent log(0); adjusted weight initialization.\n");
+
+//     freeNetwork(net_cpu);
+//     freeNetwork(net_gpu);
+//     freeMatrix(train_images, 60000);
+//     freeMatrix(train_labels, 60000);
+//     freeMatrix(test_images, 10000);
+//     freeMatrix(test_labels, 10000);
+
+//     return 0;
+// }
+
+
+v3_4
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <time.h>
+#include <cuda_runtime.h>
+
+#define INPUT_SIZE 784
+#define HIDDEN_SIZE 128
+#define OUTPUT_SIZE 10
+#define LEARNING_RATE 0.01
+#define EPOCHS 3
+#define BATCH_SIZE 64
+#define NUM_CLASSES 10
+#define NUM_STREAMS 3
+#define TILE_SIZE 16
+
+#define CUDA_CHECK(err) do { \
+    if (err != cudaSuccess) { \
+        fprintf(stderr, "CUDA error: %s at line %d\n", cudaGetErrorString(err), __LINE__); \
+        exit(EXIT_FAILURE); \
+    } \
+} while(0)
+
+double get_cpu_time(clock_t start) {
+    return (double)(clock() - start) / CLOCKS_PER_SEC;
+}
+
+float get_gpu_time(cudaEvent_t start, cudaEvent_t stop) {
+    float milliseconds = 0;
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+    return milliseconds / 1000.0;
+}
+
+// double** allocateMatrix(int rows, int cols) {
+//     double** mat;
+//     CUDA_CHECK(cudaMallocHost(&mat, rows * sizeof(double*)));
+//     for (int i = 0; i < rows; i++) {
+//         CUDA_CHECK(cudaMallocHost(&mat[i], cols * sizeof(double)));
+//     }
+//     return mat;
+// }
+
+// void freeMatrix(double** mat, int rows) {
+//     for (int i = 0; i < rows; i++) {
+//         CUDA_CHECK(cudaFreeHost(mat[i]));
+//     }
+//     CUDA_CHECK(cudaFreeHost(mat));
+// }
+
+double** allocateMatrix(int rows, int cols) {
+    double** mat = (double**)malloc(rows * sizeof(double*));
+    for (int i = 0; i < rows; i++) {
+        mat[i] = (double*)malloc(cols * sizeof(double));
+    }
+    return mat;
+}
+
+void freeMatrix(double** mat, int rows) {
+    for (int i = 0; i < rows; i++) {
+        free(mat[i]);
+    }
+    free(mat);
+}
+
+void relu_cpu(double* x, int size) {
+    for (int i = 0; i < size; i++) {
+        x[i] = (x[i] > 0) ? x[i] : 0;
+    }
+}
+
+void softmax_cpu(double* x, int size) {
+    double max = x[0];
+    for (int i = 1; i < size; i++) {
+        if (x[i] > max) max = x[i];
+    }
+    double sum = 0;
+    for (int i = 0; i < size; i++) {
+        x[i] = exp(x[i] - max);
+        sum += x[i];
+    }
+    for (int i = 0; i < size; i++) {
+        x[i] = (sum > 0) ? (x[i] / sum) : (1.0 / size);
+    }
+}
+
+__global__ void matrixMulKernel(double* A, double* B, double* C, double* bias, int rowsA, int colsA, int colsB) {
+    __shared__ double tileA[TILE_SIZE][TILE_SIZE];
+    __shared__ double tileB[TILE_SIZE][1];
+    int row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    int col = blockIdx.x * TILE_SIZE + threadIdx.x;
+    double sum = 0.0;
+    for (int t = 0; t < (colsA + TILE_SIZE - 1) / TILE_SIZE; t++) {
+        int aCol = t * TILE_SIZE + threadIdx.x;
+        if (row < rowsA && aCol < colsA) {
+            tileA[threadIdx.y][threadIdx.x] = A[row * colsA + aCol];
+        } else {
+            tileA[threadIdx.y][threadIdx.x] = 0.0;
+        }
+        int bRow = t * TILE_SIZE + threadIdx.y;
+        if (bRow < colsA && col < colsB && threadIdx.x == 0) {
+            tileB[threadIdx.y][0] = B[bRow * colsB + col];
+        } else {
+            tileB[threadIdx.y][0] = 0.0;
+        }
+        __syncthreads();
+        if (row < rowsA && col < colsB) {
+            for (int k = 0; k < TILE_SIZE; k++) {
+                sum += tileA[threadIdx.y][k] * tileB[k][0];
+            }
+        }
+        __syncthreads();
+    }
+    if (row < rowsA && col < colsB) {
+        C[row * colsB + col] = sum + bias[row];
+    }
+}
+
+__global__ void reluKernel(double* x, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        x[idx] = (x[idx] > 0) ? x[idx] : 0;
+    }
+}
+
+__global__ void softmaxKernel(double* x, int size) {
+    extern __shared__ double shared[];
+    double* max_val = shared;
+    double* sum_val = &shared[blockDim.x];
+    int idx = threadIdx.x;
+    double local_max = idx < size ? x[idx] : -INFINITY;
+    max_val[idx] = local_max;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (idx < stride && idx + stride < blockDim.x) {
+            max_val[idx] = fmax(max_val[idx], max_val[idx + stride]);
+        }
+        __syncthreads();
+    }
+    double global_max = max_val[0];
+    double local_exp = idx < size ? exp(x[idx] - global_max) : 0.0;
+    sum_val[idx] = local_exp;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (idx < stride && idx + stride < blockDim.x) {
+            sum_val[idx] += sum_val[idx + stride];
+        }
+        __syncthreads();
+    }
+    double global_sum = sum_val[0];
+    if (idx < size) {
+        x[idx] = (global_sum > 0) ? (local_exp / global_sum) : (1.0 / size);
+        x[idx] = fmax(x[idx], 1e-10);
+    }
+}
+
+__global__ void outputGradientKernel(double* output, double* target, double* d_output, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        d_output[idx] = output[idx] - target[idx];
+    }
+}
+
+__global__ void hiddenGradientKernel(double* W2, double* d_output, double* hidden, double* d_hidden, int hidden_size, int output_size) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < hidden_size) {
+        double sum = 0;
+        for (int j = 0; j < output_size; j++) {
+            sum += W2[j * hidden_size + i] * d_output[j];
+        }
+        d_hidden[i] = sum * (hidden[i] > 0);
+    }
+}
+
+__global__ void updateWeightsKernel(double* W, double* grad, double* input, int rows, int cols, double lr) {
+    int i = blockIdx.y * blockDim.y + threadIdx.y;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < rows && j < cols) {
+        W[i * cols + j] -= lr * grad[i] * input[j];
+    }
+}
+
+__global__ void updateBiasKernel(double* b, double* grad, int size, double lr) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < size) {
+        b[i] -= lr * grad[i];
+    }
+}
+
+typedef struct {
+    double** W1;
+    double** W2;
+    double* b1;
+    double* b2;
+    double *d_W1, *d_W2, *d_b1, *d_b2;
+} NeuralNetwork;
+
+NeuralNetwork* createNetwork() {
+    NeuralNetwork* net = (NeuralNetwork*)malloc(sizeof(NeuralNetwork));
+    if (!net) {
+        fprintf(stderr, "Failed to allocate NeuralNetwork\n");
+        exit(EXIT_FAILURE);
+    }
+    net->W1 = allocateMatrix(HIDDEN_SIZE, INPUT_SIZE);
+    net->W2 = allocateMatrix(OUTPUT_SIZE, HIDDEN_SIZE);
+    net->b1 = (double*)calloc(HIDDEN_SIZE, sizeof(double));
+    net->b2 = (double*)calloc(OUTPUT_SIZE, sizeof(double));
+    if (!net->b1 || !net->b2) {
+        fprintf(stderr, "Failed to allocate biases\n");
+        exit(EXIT_FAILURE);
+    }
+
+    srand(42);
+    for (int i = 0; i < HIDDEN_SIZE; i++)
+        for (int j = 0; j < INPUT_SIZE; j++)
+            net->W1[i][j] = ((double)rand() / RAND_MAX - 0.5) * 0.02;
+    for (int i = 0; i < OUTPUT_SIZE; i++)
+        for (int j = 0; j < HIDDEN_SIZE; j++)
+            net->W2[i][j] = ((double)rand() / RAND_MAX - 0.5) * 0.02;
+
+    CUDA_CHECK(cudaMalloc(&net->d_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&net->d_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&net->d_b1, HIDDEN_SIZE * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&net->d_b2, OUTPUT_SIZE * sizeof(double)));
+
+    double* temp_W1 = (double*)malloc(HIDDEN_SIZE * INPUT_SIZE * sizeof(double));
+    double* temp_W2 = (double*)malloc(OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double));
+    if (!temp_W1 || !temp_W2) {
+        fprintf(stderr, "Failed to allocate temporary weight arrays\n");
+        exit(EXIT_FAILURE);
+    }
+    for (int i = 0; i < HIDDEN_SIZE; i++)
+        for (int j = 0; j < INPUT_SIZE; j++)
+            temp_W1[i * INPUT_SIZE + j] = net->W1[i][j];
+    for (int i = 0; i < OUTPUT_SIZE; i++)
+        for (int j = 0; j < HIDDEN_SIZE; j++)
+            temp_W2[i * HIDDEN_SIZE + j] = net->W2[i][j];
+
+    CUDA_CHECK(cudaMemcpy(net->d_W1, temp_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(net->d_W2, temp_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(net->d_b1, net->b1, HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(net->d_b2, net->b2, OUTPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice));
+
+    free(temp_W1);
+    free(temp_W2);
+    return net;
+}
+
+void forward_cpu(NeuralNetwork* net, double* input, double* hidden, double* output) {
+    for (int i = 0; i < HIDDEN_SIZE; i++) {
+        hidden[i] = net->b1[i];
+        for (int j = 0; j < INPUT_SIZE; j++)
+            hidden[i] += net->W1[i][j] * input[j];
+    }
+    relu_cpu(hidden, HIDDEN_SIZE);
+    for (int i = 0; i < OUTPUT_SIZE; i++) {
+        output[i] = net->b2[i];
+        for (int j = 0; j < HIDDEN_SIZE; j++)
+            output[i] += net->W2[i][j] * hidden[j];
+    }
+    softmax_cpu(output, OUTPUT_SIZE);
+}
+
+void forward_gpu(NeuralNetwork* net, double* d_input, double* d_hidden, double* d_output, cudaStream_t stream) {
+    dim3 blockDim(TILE_SIZE, TILE_SIZE);
+    dim3 gridDim((1 + TILE_SIZE - 1) / TILE_SIZE, (HIDDEN_SIZE + TILE_SIZE - 1) / TILE_SIZE);
+    matrixMulKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W1, d_input, d_hidden, net->d_b1, HIDDEN_SIZE, INPUT_SIZE, 1);
+    int threads = 256;
+    int blocks = (HIDDEN_SIZE + threads - 1) / threads;
+    reluKernel<<<blocks, threads, 0, stream>>>(d_hidden, HIDDEN_SIZE);
+    gridDim = dim3((1 + TILE_SIZE - 1) / TILE_SIZE, (OUTPUT_SIZE + TILE_SIZE - 1) / TILE_SIZE);
+    matrixMulKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W2, d_hidden, d_output, net->d_b2, OUTPUT_SIZE, HIDDEN_SIZE, 1);
+    softmaxKernel<<<1, 32, 32 * sizeof(double) * 2, stream>>>(d_output, OUTPUT_SIZE);
+}
+
+void backward_cpu(NeuralNetwork* net, double* input, double* hidden, double* output, double* target) {
+    double d_output[OUTPUT_SIZE], d_hidden[HIDDEN_SIZE];
+    for (int i = 0; i < OUTPUT_SIZE; i++)
+        d_output[i] = output[i] - target[i];
+    for (int i = 0; i < HIDDEN_SIZE; i++) {
+        d_hidden[i] = 0;
+        for (int j = 0; j < OUTPUT_SIZE; j++)
+            d_hidden[i] += net->W2[j][i] * d_output[j];
+        d_hidden[i] *= (hidden[i] > 0);
+    }
+    for (int i = 0; i < OUTPUT_SIZE; i++)
+        for (int j = 0; j < HIDDEN_SIZE; j++)
+            net->W2[i][j] -= LEARNING_RATE * d_output[i] * hidden[j];
+    for (int i = 0; i < HIDDEN_SIZE; i++)
+        for (int j = 0; j < INPUT_SIZE; j++)
+            net->W1[i][j] -= LEARNING_RATE * d_hidden[i] * input[j];
+    for (int i = 0; i < OUTPUT_SIZE; i++)
+        net->b2[i] -= LEARNING_RATE * d_output[i];
+    for (int i = 0; i < HIDDEN_SIZE; i++)
+        net->b1[i] -= LEARNING_RATE * d_hidden[i];
+}
+
+void backward_gpu(NeuralNetwork* net, double* d_input, double* d_hidden, double* d_output, double* d_target, double* d_d_output, double* d_d_hidden, cudaStream_t stream) {
+    int threads = 256;
+    int blocks = (OUTPUT_SIZE + threads - 1) / threads;
+    outputGradientKernel<<<blocks, threads, 0, stream>>>(d_output, d_target, d_d_output, OUTPUT_SIZE);
+    blocks = (HIDDEN_SIZE + threads - 1) / threads;
+    hiddenGradientKernel<<<blocks, threads, 0, stream>>>(net->d_W2, d_d_output, d_hidden, d_d_hidden, HIDDEN_SIZE, OUTPUT_SIZE);
+    dim3 blockDim(16, 16);
+    dim3 gridDim((HIDDEN_SIZE + 15) / 16, (OUTPUT_SIZE + 15) / 16);
+    updateWeightsKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W2, d_d_output, d_hidden, OUTPUT_SIZE, HIDDEN_SIZE, LEARNING_RATE);
+    gridDim = dim3((INPUT_SIZE + 15) / 16, (HIDDEN_SIZE + 15) / 16);
+    updateWeightsKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W1, d_d_hidden, d_input, HIDDEN_SIZE, INPUT_SIZE, LEARNING_RATE);
+    blocks = (OUTPUT_SIZE + threads - 1) / threads;
+    updateBiasKernel<<<blocks, threads, 0, stream>>>(net->d_b2, d_d_output, OUTPUT_SIZE, LEARNING_RATE);
+    blocks = (HIDDEN_SIZE + threads - 1) / threads;
+    updateBiasKernel<<<blocks, threads, 0, stream>>>(net->d_b1, d_d_hidden, HIDDEN_SIZE, LEARNING_RATE);
+}
+
+void train(NeuralNetwork* net, double** images, double** labels, int numImages, bool use_gpu, double* total_time, double* loss_out, double* train_acc_out) {
+    double loss = 0.0;
+    int correct = 0;
+
+    if (use_gpu) {
+        double *d_hidden, *d_output, *d_d_output, *d_d_hidden;
+        CUDA_CHECK(cudaMalloc(&d_hidden, HIDDEN_SIZE * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_output, OUTPUT_SIZE * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_d_output, OUTPUT_SIZE * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_d_hidden, HIDDEN_SIZE * sizeof(double)));
+
+        double *d_batch_images[NUM_STREAMS], *d_batch_labels[NUM_STREAMS], *d_batch_outputs[NUM_STREAMS];
+        cudaStream_t streams[NUM_STREAMS];
+        for (int s = 0; s < NUM_STREAMS; s++) {
+            CUDA_CHECK(cudaMalloc(&d_batch_images[s], BATCH_SIZE * INPUT_SIZE * sizeof(double)));
+            CUDA_CHECK(cudaMalloc(&d_batch_labels[s], BATCH_SIZE * OUTPUT_SIZE * sizeof(double)));
+            CUDA_CHECK(cudaMalloc(&d_batch_outputs[s], BATCH_SIZE * OUTPUT_SIZE * sizeof(double)));
+            CUDA_CHECK(cudaStreamCreate(&streams[s]));
+        }
+
+        double* batch_outputs = (double*)malloc(BATCH_SIZE * OUTPUT_SIZE * sizeof(double));
+        double* temp_W1 = (double*)malloc(HIDDEN_SIZE * INPUT_SIZE * sizeof(double));
+        double* temp_W2 = (double*)malloc(OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double));
+        if (!batch_outputs || !temp_W1 || !temp_W2) {
+            fprintf(stderr, "Failed to allocate host output/weight arrays\n");
+            exit(EXIT_FAILURE);
+        }
+
+        cudaEvent_t start, stop;
+        CUDA_CHECK(cudaEventCreate(&start));
+        CUDA_CHECK(cudaEventCreate(&stop));
+        CUDA_CHECK(cudaEventRecord(start));
+
+        for (int epoch = 0; epoch < EPOCHS; epoch++) {
+            loss = 0.0;
+            correct = 0;
+
+            for (int i = 0; i < numImages; i += BATCH_SIZE) {
+                int stream_idx = (i / BATCH_SIZE) % NUM_STREAMS;
+                cudaStream_t stream = streams[stream_idx];
+                int batch_size = (i + BATCH_SIZE <= numImages) ? BATCH_SIZE : numImages - i;
+
+                for (int b = 0; b < batch_size; b++) {
+                    int img_idx = i + b;
+                    CUDA_CHECK(cudaMemcpyAsync(d_batch_images[stream_idx] + b * INPUT_SIZE,
+                                               images[img_idx],
+                                               INPUT_SIZE * sizeof(double),
+                                               cudaMemcpyHostToDevice,
+                                               stream));
+                    CUDA_CHECK(cudaMemcpyAsync(d_batch_labels[stream_idx] + b * OUTPUT_SIZE,
+                                               labels[img_idx],
+                                               OUTPUT_SIZE * sizeof(double),
+                                               cudaMemcpyHostToDevice,
+                                               stream));
+                }
+
+                for (int b = 0; b < batch_size; b++) {
+                    double* d_input = d_batch_images[stream_idx] + b * INPUT_SIZE;
+                    double* d_target = d_batch_labels[stream_idx] + b * OUTPUT_SIZE;
+                    double* d_batch_output = d_batch_outputs[stream_idx] + b * OUTPUT_SIZE;
+
+                    forward_gpu(net, d_input, d_hidden, d_output, stream);
+                    backward_gpu(net, d_input, d_hidden, d_output, d_target, d_d_output, d_d_hidden, stream);
+
+                    CUDA_CHECK(cudaMemcpyAsync(d_batch_output, d_output, OUTPUT_SIZE * sizeof(double),
+                                               cudaMemcpyDeviceToDevice, stream));
+                }
+
+                CUDA_CHECK(cudaMemcpyAsync(batch_outputs, d_batch_outputs[stream_idx],
+                                           batch_size * OUTPUT_SIZE * sizeof(double),
+                                           cudaMemcpyDeviceToHost, stream));
+
+                CUDA_CHECK(cudaStreamSynchronize(stream));
+
+                for (int b = 0; b < batch_size; b++) {
+                    int img_idx = i + b;
+                    for (int k = 0; k < OUTPUT_SIZE; k++) {
+                        double val = batch_outputs[b * OUTPUT_SIZE + k];
+                        loss -= labels[img_idx][k] * log(fmax(val, 1e-10));
+                    }
+                    int pred = 0, actual = 0;
+                    for (int j = 0; j < OUTPUT_SIZE; j++) {
+                        if (batch_outputs[b * OUTPUT_SIZE + j] > batch_outputs[b * OUTPUT_SIZE + pred]) pred = j;
+                        if (labels[img_idx][j] > labels[img_idx][actual]) actual = j;
+                    }
+                    if (pred == actual) correct++;
+                }
+            }
+
+            CUDA_CHECK(cudaDeviceSynchronize());
+            printf("GPU Epoch %d - Loss: %.4f - Train Accuracy: %.2f%%\n",
+                   epoch + 1, loss / numImages, (correct / (double)numImages) * 100);
+            if (epoch == EPOCHS - 1) {
+                *loss_out = loss / numImages;
+                *train_acc_out = (correct / (double)numImages) * 100;
+            }
+        }
+
+        CUDA_CHECK(cudaMemcpy(temp_W1, net->d_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(temp_W2, net->d_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(net->b1, net->d_b1, HIDDEN_SIZE * sizeof(double), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(net->b2, net->d_b2, OUTPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost));
+
+        for (int i = 0; i < HIDDEN_SIZE; i++)
+            for (int j = 0; j < INPUT_SIZE; j++)
+                net->W1[i][j] = temp_W1[i * INPUT_SIZE + j];
+        for (int i = 0; i < OUTPUT_SIZE; i++)
+            for (int j = 0; j < HIDDEN_SIZE; j++)
+                net->W2[i][j] = temp_W2[i * HIDDEN_SIZE + j];
+
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+        *total_time = get_gpu_time(start, stop);
+
+        CUDA_CHECK(cudaEventDestroy(start));
+        CUDA_CHECK(cudaEventDestroy(stop));
+        free(batch_outputs);
+        free(temp_W1);
+        free(temp_W2);
+        for (int s = 0; s < NUM_STREAMS; s++) {
+            CUDA_CHECK(cudaFree(d_batch_images[s]));
+            CUDA_CHECK(cudaFree(d_batch_labels[s]));
+            CUDA_CHECK(cudaFree(d_batch_outputs[s]));
+            CUDA_CHECK(cudaStreamDestroy(streams[s]));
+        }
+        CUDA_CHECK(cudaFree(d_hidden));
+        CUDA_CHECK(cudaFree(d_output));
+        CUDA_CHECK(cudaFree(d_d_output));
+        CUDA_CHECK(cudaFree(d_d_hidden));
+    } else {
+        clock_t total_start = clock();
+        for (int epoch = 0; epoch < EPOCHS; epoch++) {
+            loss = 0.0;
+            correct = 0;
+            for (int i = 0; i < numImages; i++) {
+                double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
+                forward_cpu(net, images[i], hidden, output);
+                backward_cpu(net, images[i], hidden, output, labels[i]);
+                for (int k = 0; k < OUTPUT_SIZE; k++) {
+                    loss -= labels[i][k] * log(fmax(output[k], 1e-10));
+                }
+                int pred = 0, actual = 0;
+                for (int j = 0; j < OUTPUT_SIZE; j++) {
+                    if (output[j] > output[pred]) pred = j;
+                    if (labels[i][j] > labels[i][actual]) actual = j;
+                }
+                if (pred == actual) correct++;
+            }
+            printf("CPU Epoch %d - Loss: %.4f - Train Accuracy: %.2f%%\n",
+                   epoch + 1, loss / numImages, (correct / (double)numImages) * 100);
+            if (epoch == EPOCHS - 1) {
+                *loss_out = loss / numImages;
+                *train_acc_out = (correct / (double)numImages) * 100;
+            }
+        }
+        *total_time = get_cpu_time(total_start);
+        printf("CPU Total training time: %.3fs\n", *total_time);
+    }
+}
+
+void evaluate(NeuralNetwork* net, double** images, double** labels, int numImages, bool use_gpu, double* test_acc_out) {
+    int correct = 0;
+    if (use_gpu) {
+        double *d_hidden, *d_output;
+        CUDA_CHECK(cudaMalloc(&d_hidden, HIDDEN_SIZE * sizeof(double)));
+        CUDA_CHECK(cudaMalloc(&d_output, OUTPUT_SIZE * sizeof(double)));
+
+        double *d_batch_images[NUM_STREAMS], *d_batch_outputs[NUM_STREAMS];
+        cudaStream_t streams[NUM_STREAMS];
+        for (int s = 0; s < NUM_STREAMS; s++) {
+            CUDA_CHECK(cudaMalloc(&d_batch_images[s], BATCH_SIZE * INPUT_SIZE * sizeof(double)));
+            CUDA_CHECK(cudaMalloc(&d_batch_outputs[s], BATCH_SIZE * OUTPUT_SIZE * sizeof(double)));
+            CUDA_CHECK(cudaStreamCreate(&streams[s]));
+        }
+
+        double* batch_outputs = (double*)malloc(BATCH_SIZE * OUTPUT_SIZE * sizeof(double));
+        if (!batch_outputs) {
+            fprintf(stderr, "Failed to allocate batch_outputs in evaluate\n");
+            exit(EXIT_FAILURE);
+        }
+
+        for (int i = 0; i < numImages; i += BATCH_SIZE) {
+            int stream_idx = (i / BATCH_SIZE) % NUM_STREAMS;
+            cudaStream_t stream = streams[stream_idx];
+            int batch_size = (i + BATCH_SIZE <= numImages) ? BATCH_SIZE : numImages - i;
+
+            for (int b = 0; b < batch_size; b++) {
+                int img_idx = i + b;
+                CUDA_CHECK(cudaMemcpyAsync(d_batch_images[stream_idx] + b * INPUT_SIZE,
+                                           images[img_idx],
+                                           INPUT_SIZE * sizeof(double),
+                                           cudaMemcpyHostToDevice,
+                                           stream));
+            }
+
+            for (int b = 0; b < batch_size; b++) {
+                double* d_input = d_batch_images[stream_idx] + b * INPUT_SIZE;
+                double* d_batch_output = d_batch_outputs[stream_idx] + b * OUTPUT_SIZE;
+                forward_gpu(net, d_input, d_hidden, d_output, stream);
+                CUDA_CHECK(cudaMemcpyAsync(d_batch_output, d_output, OUTPUT_SIZE * sizeof(double),
+                                           cudaMemcpyDeviceToDevice, stream));
+            }
+
+            CUDA_CHECK(cudaMemcpyAsync(batch_outputs, d_batch_outputs[stream_idx],
+                                       batch_size * OUTPUT_SIZE * sizeof(double),
+                                       cudaMemcpyDeviceToHost, stream));
+
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+
+            for (int b = 0; b < batch_size; b++) {
+                int img_idx = i + b;
+                int pred = 0, actual = 0;
+                for (int j = 0; j < OUTPUT_SIZE; j++) {
+                    if (batch_outputs[b * OUTPUT_SIZE + j] > batch_outputs[b * OUTPUT_SIZE + pred]) pred = j;
+                    if (labels[img_idx][j] > labels[img_idx][actual]) actual = j;
+                }
+                if (pred == actual) correct++;
+            }
+        }
+
+        free(batch_outputs);
+        for (int s = 0; s < NUM_STREAMS; s++) {
+            CUDA_CHECK(cudaFree(d_batch_images[s]));
+            CUDA_CHECK(cudaFree(d_batch_outputs[s]));
+            CUDA_CHECK(cudaStreamDestroy(streams[s]));
+        }
+        CUDA_CHECK(cudaFree(d_hidden));
+        CUDA_CHECK(cudaFree(d_output));
+    } else {
+        for (int i = 0; i < numImages; i++) {
+            double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
+            forward_cpu(net, images[i], hidden, output);
+            int pred = 0, actual = 0;
+            for (int j = 0; j < OUTPUT_SIZE; j++) {
+                if (output[j] > output[pred]) pred = j;
+                if (labels[i][j] > labels[i][actual]) actual = j;
+            }
+            if (pred == actual) correct++;
+        }
+    }
+    *test_acc_out = (correct / (double)numImages) * 100;
+    printf("%s Test Accuracy: %.2f%%\n", use_gpu ? "GPU" : "CPU", *test_acc_out);
+}
+
+double** loadMNISTImages(const char* filename, int numImages) {
+    FILE* file = fopen(filename, "rb");
+    if (!file) {
+        fprintf(stderr, "Error opening %s\n", filename);
+        exit(EXIT_FAILURE);
+    }
+    fseek(file, 16, SEEK_SET);
+    double** images = allocateMatrix(numImages, INPUT_SIZE);
+    for (int i = 0; i < numImages; i++) {
+        for (int j = 0; j < INPUT_SIZE; j++) {
+            unsigned char pixel;
+            if (fread(&pixel, sizeof(unsigned char), 1, file) != 1) {
+                fprintf(stderr, "Error: Failed to read pixel at image %d, pixel %d\n", i, j);
+                fclose(file);
+                exit(EXIT_FAILURE);
+            }
+            images[i][j] = pixel / 255.0;
+        }
+    }
+    fclose(file);
+    return images;
+}
+
+double** loadMNISTLabels(const char* filename, int numLabels) {
+    FILE* file = fopen(filename, "rb");
+    if (!file) {
+        fprintf(stderr, "Error opening %s\n", filename);
+        exit(EXIT_FAILURE);
+    }
+    fseek(file, 8, SEEK_SET);
+    double** labels = allocateMatrix(numLabels, OUTPUT_SIZE);
+    for (int i = 0; i < numLabels; i++) {
+        unsigned char label;
+        if (fread(&label, sizeof(unsigned char), 1, file) != 1) {
+            fprintf(stderr, "Error: Failed to read label at index %d\n", i);
+            fclose(file);
+            exit(EXIT_FAILURE);
+        }
+        if (label >= OUTPUT_SIZE) {
+            fprintf(stderr, "Invalid label %d at index %d\n", label, i);
+            fclose(file);
+            exit(EXIT_FAILURE);
+        }
+        for (int j = 0; j < OUTPUT_SIZE; j++) {
+            labels[i][j] = (j == label) ? 1.0 : 0.0;
+        }
+    }
+    fclose(file);
+    return labels;
+}
+
+void freeNetwork(NeuralNetwork* net) {
+    freeMatrix(net->W1, HIDDEN_SIZE);
+    freeMatrix(net->W2, OUTPUT_SIZE);
+    free(net->b1);
+    free(net->b2);
+    CUDA_CHECK(cudaFree(net->d_W1));
+    CUDA_CHECK(cudaFree(net->d_W2));
+    CUDA_CHECK(cudaFree(net->d_b1));
+    CUDA_CHECK(cudaFree(net->d_b2));
+    free(net);
+}
+
+int main() {
+    printf("MNIST Neural Network - V6 (Pinned Memory for Images and Labels)\n\n");
+
+    double** train_images = loadMNISTImages("data/train-images-idx3-ubyte/train-images-idx3-ubyte", 60000);
+    double** train_labels = loadMNISTLabels("data/train-labels-idx1-ubyte/train-labels-idx1-ubyte", 60000);
+    double** test_images = loadMNISTImages("data/t10k-images-idx3-ubyte/t10k-images-idx3-ubyte", 10000);
+    double** test_labels = loadMNISTLabels("data/t10k-labels-idx1-ubyte/t10k-labels-idx1-ubyte", 10000);
+    
+    NeuralNetwork* net_cpu = createNetwork();
+    double cpu_total_time, cpu_loss, cpu_train_acc, cpu_test_acc;
+    printf("Running CPU implementation...\n");
+    train(net_cpu, train_images, train_labels, 60000, false, &cpu_total_time, &cpu_loss, &cpu_train_acc);
+    evaluate(net_cpu, test_images, test_labels, 10000, false, &cpu_test_acc);
+
+    NeuralNetwork* net_gpu = createNetwork();
+    double gpu_total_time, gpu_loss, gpu_train_acc, gpu_test_acc;
+    printf("\nRunning GPU implementation...\n");
+    train(net_gpu, train_images, train_labels, 60000, true, &gpu_total_time, &gpu_loss, &gpu_train_acc);
+    evaluate(net_gpu, test_images, test_labels, 10000, true, &gpu_test_acc);
+
+    printf("\n=== Result Comparison ===\n");
+    printf("CPU Total Time: %.3fs\n", cpu_total_time);
+    printf("GPU Total Time: %.3fs\n", gpu_total_time);
+    printf("Speedup: %.2fx\n", cpu_total_time / gpu_total_time);
+    printf("CPU Loss: %.4f\n", cpu_loss);
+    printf("GPU Loss: %.4f\n", gpu_loss);
+    printf("Loss Difference: %.6f\n", fabs(cpu_loss - gpu_loss));
+    printf("CPU Train Accuracy: %.2f%%\n", cpu_train_acc);
+    printf("GPU Train Accuracy: %.2f%%\n", gpu_train_acc);
+    printf("Train Accuracy Difference: %.2f%%\n", fabs(cpu_train_acc - gpu_train_acc));
+    printf("CPU Test Accuracy: %.2f%%\n", cpu_test_acc);
+    printf("GPU Test Accuracy: %.2f%%\n", gpu_test_acc);
+    printf("Test Accuracy Difference: %.2f%%\n", fabs(cpu_test_acc - gpu_test_acc));
+
+    printf("\n=== Applied Memory Optimizations ===\n");
+    printf("1. Pinned Host Memory: Used cudaMallocHost for MNIST images and labels to enable faster host-to-device memory transfers.\n");
+    printf("2. Reused Allocated Memory: Allocated d_hidden, d_output, d_d_output, and d_d_hidden once at the start of training and evaluation, reusing them across iterations and epochs.\n");
+    printf("3. Asynchronous Transfers with Variable Streams: Used %d CUDA streams to overlap data transfers with computation.\n", NUM_STREAMS);
+    printf("4. Shared Memory Tiling in matrixMulKernel: Optimized matrix multiplications using %dx%d tiles in shared memory to reduce global memory accesses.\n", TILE_SIZE, TILE_SIZE);
+    printf("5. Numerical Stability: Fixed softmaxKernel with parallel reduction and added checks to prevent log(0); adjusted weight initialization.\n");
+
+    freeNetwork(net_cpu);
+    freeNetwork(net_gpu);
+    freeMatrix(train_images, 60000);
+    freeMatrix(train_labels, 60000);
+    freeMatrix(test_images, 10000);
+    freeMatrix(test_labels, 10000);
+
+    return 0;
+}
+
+
+v3_3_LO
+
+// #include <stdio.h>
+// #include <stdlib.h>
+// #include <math.h>
+// #include <time.h>
+// #include <cuda_runtime.h>
+// // #include <cuda_fp16.h> // Uncomment for half-precision support
+
+// #define CUDA_CHECK(err) do { \
+//     if (err != cudaSuccess) { \
+//         fprintf(stderr, "CUDA error: %s at line %d\n", cudaGetErrorString(err), __LINE__); \
+//         exit(EXIT_FAILURE); \
+//     } \
+// } while(0)
+
+// // Define precision (double, float, or __half)
+// #define DATA_TYPE double
+// typedef DATA_TYPE Real;
+
+// // Configuration struct for launch and network parameters
+// typedef struct {
+//     // Launch Configurations
+//     int block_size_1d;
+//     int block_size_2d;
+//     int num_streams;
+//     // Network Architecture
+//     int input_size;
+//     int hidden_size;
+//     int output_size;
+//     // Training Hyperparameters
+//     Real learning_rate;
+//     int epochs;
+//     int batch_size;
+// } Config;
+
+// // Default configuration
+// Config config = {
+//     .block_size_1d = 256,
+//     .block_size_2d = 32,
+//     .num_streams = 3,
+//     .input_size = 784,
+//     .hidden_size = 128,
+//     .output_size = 10,
+//     .learning_rate = 0.01f,
+//     .epochs = 3,
+//     .batch_size = 64
+// };
+
+// double get_cpu_time(clock_t start) {
+//     return (double)(clock() - start) / CLOCKS_PER_SEC;
+// }
+
+// float get_gpu_time(cudaEvent_t start, cudaEvent_t stop) {
+//     float milliseconds = 0;
+//     CUDA_CHECK(cudaEventSynchronize(stop));
+//     CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+//     return milliseconds / 1000.0;
+// }
+
+// Real** allocateMatrix(int rows, int cols) {
+//     Real** mat = (Real**)malloc(rows * sizeof(Real*));
+//     for (int i = 0; i < rows; i++) {
+//         mat[i] = (Real*)malloc(cols * sizeof(Real));
+//     }
+//     return mat;
+// }
+
+// void freeMatrix(Real** mat, int rows) {
+//     for (int i = 0; i < rows; i++) {
+//         free(mat[i]);
+//     }
+//     free(mat);
+// }
+
+// void relu_cpu(Real* x, int size) {
+//     for (int i = 0; i < size; i++) {
+//         x[i] = (x[i] > 0) ? x[i] : 0;
+//     }
+// }
+
+// void softmax_cpu(Real* x, int size) {
+//     Real max = x[0];
+//     for (int i = 1; i < size; i++) {
+//         if (x[i] > max) max = x[i];
+//     }
+//     Real sum = 0;
+//     for (int i = 0; i < size; i++) {
+//         x[i] = expf(x[i] - max);
+//         sum += x[i];
+//     }
+//     for (int i = 0; i < size; i++) {
+//         x[i] /= sum;
+//     }
+// }
+
+// void computeGridBlockDim(int rows, int cols, dim3* gridDim, dim3* blockDim, Config* config) {
+//     blockDim->x = config->block_size_2d;
+//     blockDim->y = config->block_size_2d;
+//     gridDim->x = (cols + config->block_size_2d - 1) / config->block_size_2d;
+//     gridDim->y = (rows + config->block_size_2d - 1) / config->block_size_2d;
+// }
+
+// void compute1DGridBlockDim(int size, int* blocks, int* threads, Config* config) {
+//     *threads = config->block_size_1d;
+//     *blocks = (size + config->block_size_1d - 1) / config->block_size_1d;
+// }
+
+// __global__ void matrixMulKernel(Real* A, Real* B, Real* C, Real* bias, int rowsA, int colsA, int colsB) {
+//     __shared__ Real tileA[32][32];
+//     __shared__ Real tileB[32][32];
+//     int row = blockIdx.y * blockDim.y + threadIdx.y;
+//     int col = blockIdx.x * blockDim.x + threadIdx.x;
+//     Real sum = (row < rowsA) ? bias[row] : 0;
+//     for (int k = 0; k < colsA; k += blockDim.x) {
+//         tileA[threadIdx.y][threadIdx.x] = (row < rowsA && k + threadIdx.x < colsA) ? A[row * colsA + k + threadIdx.x] : 0;
+//         tileB[threadIdx.y][threadIdx.x] = (k + threadIdx.y < colsA && col < colsB) ? B[(k + threadIdx.y) * colsB + col] : 0;
+//         __syncthreads();
+//         for (int i = 0; i < blockDim.x; i++) {
+//             sum += tileA[threadIdx.y][i] * tileB[i][threadIdx.x];
+//         }
+//         __syncthreads();
+//     }
+//     if (row < rowsA && col < colsB) {
+//         C[row * colsB + col] = sum;
+//     }
+// }
+
+// __global__ void reluKernel(Real* x, int size) {
+//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (idx < size) {
+//         x[idx] = (x[idx] > 0) ? x[idx] : 0;
+//     }
+// }
+
+// __global__ void softmaxKernel(Real* x, int size) {
+//     if (threadIdx.x == 0 && blockIdx.x == 0) {
+//         Real max = x[0];
+//         for (int i = 1; i < size; i++) {
+//             if (x[i] > max) max = x[i];
+//         }
+//         Real sum = 0;
+//         for (int i = 0; i < size; i++) {
+//             x[i] = expf(x[i] - max);
+//             sum += x[i];
+//         }
+//         for (int i = 0; i < size; i++) {
+//             x[i] /= sum;
+//         }
+//     }
+// }
+
+// __global__ void outputGradientKernel(Real* output, Real* target, Real* d_output, int size) {
+//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (idx < size) {
+//         d_output[idx] = output[idx] - target[idx];
+//     }
+// }
+
+// __global__ void hiddenGradientKernel(Real* W2, Real* d_output, Real* hidden, Real* d_hidden, int hidden_size, int output_size) {
+//     int i = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (i < hidden_size) {
+//         Real sum = 0;
+//         for (int j = 0; j < output_size; j++) {
+//             sum += W2[j * hidden_size + i] * d_output[j];
+//         }
+//         d_hidden[i] = sum * (hidden[i] > 0);
+//     }
+// }
+
+// __global__ void updateWeightsKernel(Real* W, Real* grad, Real* input, int rows, int cols, Real lr) {
+//     int i = blockIdx.y * blockDim.y + threadIdx.y;
+//     int j = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (i < rows && j < cols) {
+//         W[i * cols + j] -= lr * grad[i] * input[j];
+//     }
+// }
+
+// __global__ void updateBiasKernel(Real* b, Real* grad, int size, Real lr) {
+//     int i = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (i < size) {
+//         b[i] -= lr * grad[i];
+//     }
+// }
+
+// typedef struct {
+//     Real** W1;
+//     Real** W2;
+//     Real* b1;
+//     Real* b2;
+//     Real *d_W1, *d_W2, *d_b1, *d_b2;
+// } NeuralNetwork;
+
+// NeuralNetwork* createNetwork(Config* config) {
+//     NeuralNetwork* net = (NeuralNetwork*)malloc(sizeof(NeuralNetwork));
+//     net->W1 = allocateMatrix(config->hidden_size, config->input_size);
+//     net->W2 = allocateMatrix(config->output_size, config->hidden_size);
+//     net->b1 = (Real*)calloc(config->hidden_size, sizeof(Real));
+//     net->b2 = (Real*)calloc(config->output_size, sizeof(Real));
+
+//     srand(42);
+//     for (int i = 0; i < config->hidden_size; i++)
+//         for (int j = 0; j < config->input_size; j++)
+//             net->W1[i][j] = ((Real)rand() / RAND_MAX) * 0.01;
+
+//     for (int i = 0; i < config->output_size; i++)
+//         for (int j = 0; j < config->hidden_size; j++)
+//             net->W2[i][j] = ((Real)rand() / RAND_MAX) * 0.01;
+
+//     CUDA_CHECK(cudaMalloc(&net->d_W1, config->hidden_size * config->input_size * sizeof(Real)));
+//     CUDA_CHECK(cudaMalloc(&net->d_W2, config->output_size * config->hidden_size * sizeof(Real)));
+//     CUDA_CHECK(cudaMalloc(&net->d_b1, config->hidden_size * sizeof(Real)));
+//     CUDA_CHECK(cudaMalloc(&net->d_b2, config->output_size * sizeof(Real)));
+
+//     Real* temp_W1;
+//     Real* temp_W2;
+//     CUDA_CHECK(cudaMallocHost(&temp_W1, config->hidden_size * config->input_size * sizeof(Real)));
+//     CUDA_CHECK(cudaMallocHost(&temp_W2, config->output_size * config->hidden_size * sizeof(Real)));
+//     for (int i = 0; i < config->hidden_size; i++)
+//         for (int j = 0; j < config->input_size; j++)
+//             temp_W1[i * config->input_size + j] = net->W1[i][j];
+//     for (int i = 0; i < config->output_size; i++)
+//         for (int j = 0; j < config->hidden_size; j++)
+//             temp_W2[i * config->hidden_size + j] = net->W2[i][j];
+
+//     CUDA_CHECK(cudaMemcpy(net->d_W1, temp_W1, config->hidden_size * config->input_size * sizeof(Real), cudaMemcpyHostToDevice));
+//     CUDA_CHECK(cudaMemcpy(net->d_W2, temp_W2, config->output_size * config->hidden_size * sizeof(Real), cudaMemcpyHostToDevice));
+//     CUDA_CHECK(cudaMemcpy(net->d_b1, net->b1, config->hidden_size * sizeof(Real), cudaMemcpyHostToDevice));
+//     CUDA_CHECK(cudaMemcpy(net->d_b2, net->b2, config->output_size * sizeof(Real), cudaMemcpyHostToDevice));
+
+//     CUDA_CHECK(cudaFreeHost(temp_W1));
+//     CUDA_CHECK(cudaFreeHost(temp_W2));
+
+//     return net;
+// }
+
+// void forward_cpu(NeuralNetwork* net, Real* input, Real* hidden, Real* output, Config* config) {
+//     for (int i = 0; i < config->hidden_size; i++) {
+//         hidden[i] = net->b1[i];
+//         for (int j = 0; j < config->input_size; j++)
+//             hidden[i] += net->W1[i][j] * input[j];
+//     }
+//     relu_cpu(hidden, config->hidden_size);
+
+//     for (int i = 0; i < config->output_size; i++) {
+//         output[i] = net->b2[i];
+//         for (int j = 0; j < config->hidden_size; j++)
+//             output[i] += net->W2[i][j] * hidden[j];
+//     }
+//     softmax_cpu(output, config->output_size);
+// }
+
+// void forward_gpu(NeuralNetwork* net, Real* d_input, Real* d_hidden, Real* d_output, cudaStream_t stream, Config* config) {
+//     dim3 blockDim, gridDim;
+//     computeGridBlockDim(config->hidden_size, 1, &gridDim, &blockDim, config);
+//     matrixMulKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W1, d_input, d_hidden, net->d_b1, config->hidden_size, config->input_size, 1);
+
+//     int blocks, threads;
+//     compute1DGridBlockDim(config->hidden_size, &blocks, &threads, config);
+//     reluKernel<<<blocks, threads, 0, stream>>>(d_hidden, config->hidden_size);
+
+//     computeGridBlockDim(config->output_size, 1, &gridDim, &blockDim, config);
+//     matrixMulKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W2, d_hidden, d_output, net->d_b2, config->output_size, config->hidden_size, 1);
+
+//     compute1DGridBlockDim(config->output_size, &blocks, &threads, config);
+//     softmaxKernel<<<1, 32, 0, stream>>>(d_output, config->output_size);
+// }
+
+// void backward_cpu(NeuralNetwork* net, Real* input, Real* hidden, Real* output, Real* target, Config* config) {
+//     Real d_output[1024], d_hidden[1024]; // Adjust size as needed
+
+//     for (int i = 0; i < config->output_size; i++)
+//         d_output[i] = output[i] - target[i];
+
+//     for (int i = 0; i < config->hidden_size; i++) {
+//         d_hidden[i] = 0;
+//         for (int j = 0; j < config->output_size; j++)
+//             d_hidden[i] += net->W2[j][i] * d_output[j];
+//         d_hidden[i] *= (hidden[i] > 0);
+//     }
+
+//     for (int i = 0; i < config->output_size; i++)
+//         for (int j = 0; j < config->hidden_size; j++)
+//             net->W2[i][j] -= config->learning_rate * d_output[i] * hidden[j];
+
+//     for (int i = 0; i < config->hidden_size; i++)
+//         for (int j = 0; j < config->input_size; j++)
+//             net->W1[i][j] -= config->learning_rate * d_hidden[i] * input[j];
+
+//     for (int i = 0; i < config->output_size; i++)
+//         net->b2[i] -= config->learning_rate * d_output[i];
+
+//     for (int i = 0; i < config->hidden_size; i++)
+//         net->b1[i] -= config->learning_rate * d_hidden[i];
+// }
+
+// void backward_gpu(NeuralNetwork* net, Real* d_input, Real* d_hidden, Real* d_output, Real* d_target, Real* d_d_output, Real* d_d_hidden, cudaStream_t stream, Config* config) {
+//     int blocks, threads;
+//     compute1DGridBlockDim(config->output_size, &blocks, &threads, config);
+//     outputGradientKernel<<<blocks, threads, 0, stream>>>(d_output, d_target, d_d_output, config->output_size);
+
+//     compute1DGridBlockDim(config->hidden_size, &blocks, &threads, config);
+//     hiddenGradientKernel<<<blocks, threads, 0, stream>>>(net->d_W2, d_d_output, d_hidden, d_d_hidden, config->hidden_size, config->output_size);
+
+//     dim3 blockDim, gridDim;
+//     computeGridBlockDim(config->output_size, config->hidden_size, &gridDim, &blockDim, config);
+//     updateWeightsKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W2, d_d_output, d_hidden, config->output_size, config->hidden_size, config->learning_rate);
+
+//     computeGridBlockDim(config->hidden_size, config->input_size, &gridDim, &blockDim, config);
+//     updateWeightsKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W1, d_d_hidden, d_input, config->hidden_size, config->input_size, config->learning_rate);
+
+//     compute1DGridBlockDim(config->output_size, &blocks, &threads, config);
+//     updateBiasKernel<<<blocks, threads, 0, stream>>>(net->d_b2, d_d_output, config->output_size, config->learning_rate);
+
+//     compute1DGridBlockDim(config->hidden_size, &blocks, &threads, config);
+//     updateBiasKernel<<<blocks, threads, 0, stream>>>(net->d_b1, d_d_hidden, config->hidden_size, config->learning_rate);
+// }
+
+// void train(NeuralNetwork* net, Real** images, Real** labels, int numImages, bool use_gpu, double* total_time, double* loss_out, double* train_acc_out, Config* config) {
+//     double loss = 0.0;
+//     int correct = 0;
+
+//     if (use_gpu) {
+//         Real *d_hidden, *d_output, *d_d_output, *d_d_hidden;
+//         CUDA_CHECK(cudaMalloc(&d_hidden, config->hidden_size * sizeof(Real)));
+//         CUDA_CHECK(cudaMalloc(&d_output, config->output_size * sizeof(Real)));
+//         CUDA_CHECK(cudaMalloc(&d_d_output, config->output_size * sizeof(Real)));
+//         CUDA_CHECK(cudaMalloc(&d_d_hidden, config->hidden_size * sizeof(Real)));
+
+//         Real *d_batch_images[config->num_streams], *d_batch_labels[config->num_streams], *d_batch_outputs[config->num_streams];
+//         Real *h_batch_outputs[config->num_streams];
+//         cudaStream_t streams[config->num_streams];
+//         for (int s = 0; s < config->num_streams; s++) {
+//             CUDA_CHECK(cudaMalloc(&d_batch_images[s], config->batch_size * config->input_size * sizeof(Real)));
+//             CUDA_CHECK(cudaMalloc(&d_batch_labels[s], config->batch_size * config->output_size * sizeof(Real)));
+//             CUDA_CHECK(cudaMalloc(&d_batch_outputs[s], config->batch_size * config->output_size * sizeof(Real)));
+//             CUDA_CHECK(cudaMallocHost(&h_batch_outputs[s], config->batch_size * config->output_size * sizeof(Real)));
+//             CUDA_CHECK(cudaStreamCreate(&streams[s]));
+//         }
+
+//         Real* temp_W1;
+//         Real* temp_W2;
+//         CUDA_CHECK(cudaMallocHost(&temp_W1, config->hidden_size * config->input_size * sizeof(Real)));
+//         CUDA_CHECK(cudaMallocHost(&temp_W2, config->output_size * config->hidden_size * sizeof(Real)));
+
+//         cudaEvent_t start, stop;
+//         CUDA_CHECK(cudaEventCreate(&start));
+//         CUDA_CHECK(cudaEventCreate(&stop));
+//         CUDA_CHECK(cudaEventRecord(start));
+
+//         for (int epoch = 0; epoch < config->epochs; epoch++) {
+//             loss = 0.0;
+//             correct = 0;
+
+//             for (int i = 0; i < numImages; i += config->batch_size) {
+//                 int stream_idx = (i / config->batch_size) % config->num_streams;
+//                 cudaStream_t stream = streams[stream_idx];
+//                 int batch_size = (i + config->batch_size <= numImages) ? config->batch_size : numImages - i;
+
+//                 for (int b = 0; b < batch_size; b++) {
+//                     int img_idx = i + b;
+//                     CUDA_CHECK(cudaMemcpyAsync(d_batch_images[stream_idx] + b * config->input_size, images[img_idx],
+//                                                config->input_size * sizeof(Real), cudaMemcpyHostToDevice, stream));
+//                     CUDA_CHECK(cudaMemcpyAsync(d_batch_labels[stream_idx] + b * config->output_size, labels[img_idx],
+//                                                config->output_size * sizeof(Real), cudaMemcpyHostToDevice, stream));
+//                 }
+
+//                 for (int b = 0; b < batch_size; b++) {
+//                     Real* d_input = d_batch_images[stream_idx] + b * config->input_size;
+//                     Real* d_target = d_batch_labels[stream_idx] + b * config->output_size;
+//                     Real* d_batch_output = d_batch_outputs[stream_idx] + b * config->output_size;
+
+//                     forward_gpu(net, d_input, d_hidden, d_output, stream, config);
+//                     backward_gpu(net, d_input, d_hidden, d_output, d_target, d_d_output, d_d_hidden, stream, config);
+
+//                     CUDA_CHECK(cudaMemcpyAsync(d_batch_output, d_output, config->output_size * sizeof(Real),
+//                                                cudaMemcpyDeviceToDevice, stream));
+//                 }
+
+//                 CUDA_CHECK(cudaMemcpyAsync(h_batch_outputs[stream_idx], d_batch_outputs[stream_idx],
+//                                            batch_size * config->output_size * sizeof(Real), cudaMemcpyDeviceToHost, stream));
+
+//                 CUDA_CHECK(cudaStreamSynchronize(stream));
+
+//                 for (int b = 0; b < batch_size; b++) {
+//                     int img_idx = i + b;
+//                     for (int k = 0; k < config->output_size; k++) {
+//                         loss -= labels[img_idx][k] * log(h_batch_outputs[stream_idx][b * config->output_size + k] + 1e-10);
+//                     }
+//                     int pred = 0, actual = 0;
+//                     for (int j = 0; j < config->output_size; j++) {
+//                         if (h_batch_outputs[stream_idx][b * config->output_size + j] > h_batch_outputs[stream_idx][b * config->output_size + pred]) pred = j;
+//                         if (labels[img_idx][j] > labels[img_idx][actual]) actual = j;
+//                     }
+//                     if (pred == actual) correct++;
+//                 }
+//             }
+
+//             printf("GPU Epoch %d - Loss: %.4f - Train Accuracy: %.2f%%\n",
+//                    epoch + 1, loss / numImages, (correct / (double)numImages) * 100);
+//             if (epoch == config->epochs - 1) {
+//                 *loss_out = loss / numImages;
+//                 *train_acc_out = (correct / (double)numImages) * 100;
+//             }
+//         }
+
+//         CUDA_CHECK(cudaMemcpy(temp_W1, net->d_W1, config->hidden_size * config->input_size * sizeof(Real), cudaMemcpyDeviceToHost));
+//         CUDA_CHECK(cudaMemcpy(temp_W2, net->d_W2, config->output_size * config->hidden_size * sizeof(Real), cudaMemcpyDeviceToHost));
+//         CUDA_CHECK(cudaMemcpy(net->b1, net->d_b1, config->hidden_size * sizeof(Real), cudaMemcpyDeviceToHost));
+//         CUDA_CHECK(cudaMemcpy(net->b2, net->d_b2, config->output_size * sizeof(Real), cudaMemcpyDeviceToHost));
+
+//         CUDA_CHECK(cudaEventRecord(stop));
+//         CUDA_CHECK(cudaEventSynchronize(stop));
+//         *total_time = get_gpu_time(start, stop);
+
+//         CUDA_CHECK(cudaEventDestroy(start));
+//         CUDA_CHECK(cudaEventDestroy(stop));
+
+//         for (int i = 0; i < config->hidden_size; i++)
+//             for (int j = 0; j < config->input_size; j++)
+//                 net->W1[i][j] = temp_W1[i * config->input_size + j];
+//         for (int i = 0; i < config->output_size; i++)
+//             for (int j = 0; j < config->hidden_size; j++)
+//                 net->W2[i][j] = temp_W2[i * config->hidden_size + j];
+
+//         CUDA_CHECK(cudaFreeHost(temp_W1));
+//         CUDA_CHECK(cudaFreeHost(temp_W2));
+//         for (int s = 0; s < config->num_streams; s++) {
+//             CUDA_CHECK(cudaFreeHost(h_batch_outputs[s]));
+//             CUDA_CHECK(cudaFree(d_batch_images[s]));
+//             CUDA_CHECK(cudaFree(d_batch_labels[s]));
+//             CUDA_CHECK(cudaFree(d_batch_outputs[s]));
+//             CUDA_CHECK(cudaStreamDestroy(streams[s]));
+//         }
+//         CUDA_CHECK(cudaFree(d_hidden));
+//         CUDA_CHECK(cudaFree(d_output));
+//         CUDA_CHECK(cudaFree(d_d_output));
+//         CUDA_CHECK(cudaFree(d_d_hidden));
+//     } else {
+//         clock_t total_start = clock();
+
+//         for (int epoch = 0; epoch < config->epochs; epoch++) {
+//             loss = 0.0;
+//             correct = 0;
+
+//             for (int i = 0; i < numImages; i++) {
+//                 Real hidden[1024], output[1024]; // Adjust size as needed
+//                 forward_cpu(net, images[i], hidden, output, config);
+//                 backward_cpu(net, images[i], hidden, output, labels[i], config);
+
+//                 for (int k = 0; k < config->output_size; k++) {
+//                     loss -= labels[i][k] * log(output[k] + 1e-10);
+//                 }
+//                 int pred = 0, actual = 0;
+//                 for (int j = 0; j < config->output_size; j++) {
+//                     if (output[j] > output[pred]) pred = j;
+//                     if (labels[i][j] > labels[i][actual]) actual = j;
+//                 }
+//                 if (pred == actual) correct++;
+//             }
+
+//             printf("CPU Epoch %d - Loss: %.4f - Train Accuracy: %.2f%%\n",
+//                    epoch + 1, loss / numImages, (correct / (double)numImages) * 100);
+//             if (epoch == config->epochs - 1) {
+//                 *loss_out = loss / numImages;
+//                 *train_acc_out = (correct / (double)numImages) * 100;
+//             }
+//         }
+
+//         *total_time = get_cpu_time(total_start);
+//         printf("CPU Total training time: %.3fs\n", *total_time);
+//     }
+// }
+
+// void evaluate(NeuralNetwork* net, Real** images, Real** labels, int numImages, bool use_gpu, double* test_acc_out, Config* config) {
+//     int correct = 0;
+//     if (use_gpu) {
+//         Real *d_hidden, *d_output;
+//         CUDA_CHECK(cudaMalloc(&d_hidden, config->hidden_size * sizeof(Real)));
+//         CUDA_CHECK(cudaMalloc(&d_output, config->output_size * sizeof(Real)));
+
+//         Real *h_batch_images[config->num_streams], *h_batch_outputs[config->num_streams];
+//         Real *d_batch_images[config->num_streams], *d_batch_outputs[config->num_streams];
+//         cudaStream_t streams[config->num_streams];
+//         for (int s = 0; s < config->num_streams; s++) {
+//             CUDA_CHECK(cudaMallocHost(&h_batch_images[s], config->batch_size * config->input_size * sizeof(Real)));
+//             CUDA_CHECK(cudaMallocHost(&h_batch_outputs[s], config->batch_size * config->output_size * sizeof(Real)));
+//             CUDA_CHECK(cudaMalloc(&d_batch_images[s], config->batch_size * config->input_size * sizeof(Real)));
+//             CUDA_CHECK(cudaMalloc(&d_batch_outputs[s], config->batch_size * config->output_size * sizeof(Real)));
+//             CUDA_CHECK(cudaStreamCreate(&streams[s]));
+//         }
+
+//         for (int i = 0; i < numImages; i += config->batch_size) {
+//             int stream_idx = (i / config->batch_size) % config->num_streams;
+//             cudaStream_t stream = streams[stream_idx];
+//             int batch_size = (i + config->batch_size <= numImages) ? config->batch_size : numImages - i;
+
+//             for (int b = 0; b < batch_size; b++) {
+//                 int img_idx = i + b;
+//                 for (int j = 0; j < config->input_size; j++) {
+//                     h_batch_images[stream_idx][b * config->input_size + j] = images[img_idx][j];
+//                 }
+//             }
+
+//             CUDA_CHECK(cudaMemcpyAsync(d_batch_images[stream_idx], h_batch_images[stream_idx],
+//                                        batch_size * config->input_size * sizeof(Real), cudaMemcpyHostToDevice, stream));
+
+//             for (int b = 0; b < batch_size; b++) {
+//                 Real* d_input = d_batch_images[stream_idx] + b * config->input_size;
+//                 Real* d_batch_output = d_batch_outputs[stream_idx] + b * config->output_size;
+
+//                 forward_gpu(net, d_input, d_hidden, d_output, stream, config);
+
+//                 CUDA_CHECK(cudaMemcpyAsync(d_batch_output, d_output, config->output_size * sizeof(Real),
+//                                            cudaMemcpyDeviceToDevice, stream));
+//             }
+
+//             CUDA_CHECK(cudaMemcpyAsync(h_batch_outputs[stream_idx], d_batch_outputs[stream_idx],
+//                                        batch_size * config->output_size * sizeof(Real), cudaMemcpyDeviceToHost, stream));
+
+//             CUDA_CHECK(cudaStreamSynchronize(stream));
+
+//             for (int b = 0; b < batch_size; b++) {
+//                 int img_idx = i + b;
+//                 int pred = 0, actual = 0;
+//                 for (int j = 0; j < config->output_size; j++) {
+//                     if (h_batch_outputs[stream_idx][b * config->output_size + j] > h_batch_outputs[stream_idx][b * config->output_size + pred]) pred = j;
+//                     if (labels[img_idx][j] > labels[img_idx][actual]) actual = j;
+//                 }
+//                 if (pred == actual) correct++;
+//             }
+//         }
+
+//         for (int s = 0; s < config->num_streams; s++) {
+//             CUDA_CHECK(cudaFreeHost(h_batch_images[s]));
+//             CUDA_CHECK(cudaFreeHost(h_batch_outputs[s]));
+//             CUDA_CHECK(cudaFree(d_batch_images[s]));
+//             CUDA_CHECK(cudaFree(d_batch_outputs[s]));
+//             CUDA_CHECK(cudaStreamDestroy(streams[s]));
+//         }
+//         CUDA_CHECK(cudaFree(d_hidden));
+//         CUDA_CHECK(cudaFree(d_output));
+//     } else {
+//         for (int i = 0; i < numImages; i++) {
+//             Real hidden[1024], output[1024]; // Adjust size as needed
+//             forward_cpu(net, images[i], hidden, output, config);
+//             int pred = 0, actual = 0;
+//             for (int j = 0; j < config->output_size; j++) {
+//                 if (output[j] > output[pred]) pred = j;
+//                 if (labels[i][j] > labels[i][actual]) actual = j;
+//             }
+//             if (pred == actual) correct++;
+//         }
+//     }
+//     *test_acc_out = (correct / (double)numImages) * 100;
+//     printf("%s Test Accuracy: %.2f%%\n", use_gpu ? "GPU" : "CPU", *test_acc_out);
+// }
+
+// Real** loadMNISTImages(const char* filename, int numImages, Config* config) {
+//     FILE* file = fopen(filename, "rb");
+//     if (!file) {
+//         printf("Error opening %s\n", filename);
+//         exit(1);
+//     }
+//     fseek(file, 16, SEEK_SET);
+//     Real** images = allocateMatrix(numImages, config->input_size);
+//     for (int i = 0; i < numImages; i++) {
+//         for (int j = 0; j < config->input_size; j++) {
+//             unsigned char pixel;
+//             if (fread(&pixel, sizeof(unsigned char), 1, file) != 1) {
+//                 fprintf(stderr, "Error: Failed to read pixel\n");
+//                 fclose(file);
+//                 exit(EXIT_FAILURE);
+//             }
+//             images[i][j] = pixel / 255.0f;
+//         }
+//     }
+//     fclose(file);
+//     return images;
+// }
+
+// Real** loadMNISTLabels(const char* filename, int numLabels, Config* config) {
+//     FILE* file = fopen(filename, "rb");
+//     if (!file) {
+//         printf("Error opening %s\n", filename);
+//         exit(1);
+//     }
+//     fseek(file, 8, SEEK_SET);
+//     Real** labels = allocateMatrix(numLabels, config->output_size);
+//     for (int i = 0; i < numLabels; i++) {
+//         unsigned char label;
+//         if (fread(&label, sizeof(unsigned char), 1, file) != 1) {
+//             fprintf(stderr, "Error: Failed to read label\n");
+//             fclose(file);
+//             exit(EXIT_FAILURE);
+//         }
+//         for (int j = 0; j < config->output_size; j++) {
+//             labels[i][j] = (j == label) ? 1.0f : 0.0f;
+//         }
+//     }
+//     fclose(file);
+//     return labels;
+// }
+
+// void freeNetwork(NeuralNetwork* net, Config* config) {
+//     freeMatrix(net->W1, config->hidden_size);
+//     freeMatrix(net->W2, config->output_size);
+//     free(net->b1);
+//     free(net->b2);
+//     CUDA_CHECK(cudaFree(net->d_W1));
+//     CUDA_CHECK(cudaFree(net->d_W2));
+//     CUDA_CHECK(cudaFree(net->d_b1));
+//     CUDA_CHECK(cudaFree(net->d_b2));
+//     free(net);
+// }
+
+// int main() {
+//     printf("MNIST Neural Network - Optimized Version\n\n");
+
+//     // Print applied optimizations
+//     printf("=== Applied Optimizations ===\n");
+//     printf("1. Dynamic Block and Grid Size Calculation: Block and grid dimensions are computed dynamically using configurable block sizes (1D: %d, 2D: %dx%d) to optimize for different input sizes and GPU architectures.\n",
+//            config.block_size_1d, config.block_size_2d, config.block_size_2d);
+//     printf("2. Variable Precision: Supports configurable precision via DATA_TYPE macro, allowing use of double, float, or half-precision to balance performance and accuracy.\n");
+//     printf("3. Tiled Matrix Multiplication: Matrix multiplication kernel uses 32x32 shared memory tiles to improve data locality and reduce global memory accesses.\n");
+//     printf("4. Pinned Host Memory: Uses cudaMallocHost for host-side allocations (temp_W1, temp_W2) to enable faster device-to-host memory transfers.\n");
+//     printf("5. Reused Allocated Memory: Device memory for hidden, output, and gradient arrays is allocated once and reused across iterations to minimize allocation overhead.\n");
+//     printf("6. Asynchronous Transfers with Variable Streams: Uses %d CUDA streams to overlap data transfers and computations, improving GPU utilization.\n", config.num_streams);
+//     printf("\n");
+
+//     Real** train_images = loadMNISTImages("data/train-images-idx3-ubyte/train-images-idx3-ubyte", 60000, &config);
+//     Real** train_labels = loadMNISTLabels("data/train-labels-idx1-ubyte/train-labels-idx1-ubyte", 60000, &config);
+//     Real** test_images = loadMNISTImages("data/t10k-images-idx3-ubyte/t10k-images-idx3-ubyte", 10000, &config);
+//     Real** test_labels = loadMNISTLabels("data/t10k-labels-idx1-ubyte/t10k-labels-idx1-ubyte", 10000, &config);
+
+//     NeuralNetwork* net_cpu = createNetwork(&config);
+//     double cpu_total_time, cpu_loss, cpu_train_acc, cpu_test_acc;
+//     printf("Running CPU implementation...\n");
+//     train(net_cpu, train_images, train_labels, 60000, false, &cpu_total_time, &cpu_loss, &cpu_train_acc, &config);
+//     evaluate(net_cpu, test_images, test_labels, 10000, false, &cpu_test_acc, &config);
+
+//     NeuralNetwork* net_gpu = createNetwork(&config);
+//     double gpu_total_time, gpu_loss, gpu_train_acc, gpu_test_acc;
+//     printf("\nRunning GPU implementation...\n");
+//     train(net_gpu, train_images, train_labels, 60000, true, &gpu_total_time, &gpu_loss, &gpu_train_acc, &config);
+//     evaluate(net_gpu, test_images, test_labels, 10000, true, &gpu_test_acc, &config);
+
+//     printf("\n=== Result Comparison ===\n");
+//     printf("CPU Total Time: %.3fs\n", cpu_total_time);
+//     printf("GPU Total Time: %.3fs\n", gpu_total_time);
+//     printf("Speedup: %.2fx\n", cpu_total_time / gpu_total_time);
+//     printf("CPU Loss: %.4f\n", cpu_loss);
+//     printf("GPU Loss: %.4f\n", gpu_loss);
+//     printf("Loss Difference: %.6f\n", fabs(cpu_loss - gpu_loss));
+//     printf("CPU Train Accuracy: %.2f%%\n", cpu_train_acc);
+//     printf("GPU Train Accuracy: %.2f%%\n", gpu_train_acc);
+//     printf("Train Accuracy Difference: %.2f%%\n", fabs(cpu_train_acc - gpu_train_acc));
+//     printf("CPU Test Accuracy: %.2f%%\n", cpu_test_acc);
+//     printf("GPU Test Accuracy: %.2f%%\n", gpu_test_acc);
+//     printf("Test Accuracy Difference: %.2f%%\n", fabs(cpu_test_acc - gpu_test_acc));
+
+//     freeNetwork(net_cpu, &config);
+//     freeNetwork(net_gpu, &config);
+//     freeMatrix(train_images, 60000);
+//     freeMatrix(train_labels, 60000);
+//     freeMatrix(test_images, 10000);
+//     freeMatrix(test_labels, 10000);
+
+//     return 0;
+// }
+
+// #include <stdio.h>
+// #include <stdlib.h>
+// #include <math.h>
+// #include <time.h>
+// #include <cuda_runtime.h>
+
+// #define INPUT_SIZE 784
+// #define HIDDEN_SIZE 128
+// #define OUTPUT_SIZE 10
+// #define LEARNING_RATE 0.01
+// #define EPOCHS 3
+// #define BATCH_SIZE 64
+// #define NUM_CLASSES 10
+
+// #define CUDA_CHECK(err) do { \
+//     if (err != cudaSuccess) { \
+//         fprintf(stderr, "CUDA error: %s at line %d\n", cudaGetErrorString(err), __LINE__); \
+//         exit(EXIT_FAILURE); \
+//     } \
+// } while(0)
+
+// // Configuration struct for launch parameters
+// typedef struct {
+//     int block_size_1d;     // Threads per block for 1D kernels
+//     int block_size_2d_x;   // Block dimension X for 2D kernels
+//     int block_size_2d_y;   // Block dimension Y for 2D kernels
+//     int num_streams;       // Number of CUDA streams
+// } Config;
+
+// // Default configuration
+// Config config = {
+//     .block_size_1d = 1024,
+//     .block_size_2d_x = 16,
+//     .block_size_2d_y = 16,
+//     .num_streams = 3
+// };
+
+// double get_cpu_time(clock_t start) {
+//     return (double)(clock() - start) / CLOCKS_PER_SEC;
+// }
+
+// float get_gpu_time(cudaEvent_t start, cudaEvent_t stop) {
+//     float milliseconds = 0;
+//     CUDA_CHECK(cudaEventSynchronize(stop));
+//     CUDA_CHECK(cudaEventElapsedTime(&milliseconds, start, stop));
+//     return milliseconds / 1000.0;
+// }
+
+// double** allocateMatrix(int rows, int cols) {
+//     double** mat = (double**)malloc(rows * sizeof(double*));
+//     for (int i = 0; i < rows; i++) {
+//         mat[i] = (double*)malloc(cols * sizeof(double));
+//     }
+//     return mat;
+// }
+
+// void freeMatrix(double** mat, int rows) {
+//     for (int i = 0; i < rows; i++) {
+//         free(mat[i]);
+//     }
+//     free(mat);
+// }
+
+// void relu_cpu(double* x, int size) {
+//     for (int i = 0; i < size; i++) {
+//         x[i] = (x[i] > 0) ? x[i] : 0;
+//     }
+// }
+
+// void softmax_cpu(double* x, int size) {
+//     double max = x[0];
+//     for (int i = 1; i < size; i++) {
+//         if (x[i] > max) max = x[i];
+//     }
+//     double sum = 0;
+//     for (int i = 0; i < size; i++) {
+//         x[i] = exp(x[i] - max);
+//         sum += x[i];
+//     }
+//     for (int i = 0; i < size; i++) {
+//         x[i] /= sum;
+//     }
+// }
+
+// // Compute grid and block dimensions for 2D kernels
+// void computeGridBlockDim(int rows, int cols, dim3* gridDim, dim3* blockDim, Config* config) {
+//     blockDim->x = config->block_size_2d_x;
+//     blockDim->y = config->block_size_2d_y;
+//     gridDim->x = (cols + config->block_size_2d_x - 1) / config->block_size_2d_x;
+//     gridDim->y = (rows + config->block_size_2d_y - 1) / config->block_size_2d_y;
+// }
+
+// // Compute blocks and threads for 1D kernels
+// void compute1DGridBlockDim(int size, int* blocks, int* threads, Config* config) {
+//     *threads = config->block_size_1d;
+//     *blocks = (size + config->block_size_1d - 1) / config->block_size_1d;
+// }
+
+// __global__ void matrixMulKernel(double* A, double* B, double* C, double* bias, int rowsA, int colsA, int colsB) {
+//     int row = blockIdx.y * blockDim.y + threadIdx.y;
+//     int col = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (row < rowsA && col < colsB) {
+//         double sum = bias[row];
+//         for (int k = 0; k < colsA; k++) {
+//             sum += A[row * colsA + k] * B[k * colsB + col];
+//         }
+//         C[row * colsB + col] = sum;
+//     }
+// }
+
+// __global__ void reluKernel(double* x, int size) {
+//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (idx < size) {
+//         x[idx] = (x[idx] > 0) ? x[idx] : 0;
+//     }
+// }
+
+// __global__ void softmaxKernel(double* x, int size) {
+//     if (threadIdx.x == 0 && blockIdx.x == 0) {
+//         double max = x[0];
+//         for (int i = 1; i < size; i++) {
+//             if (x[i] > max) max = x[i];
+//         }
+//         double sum = 0;
+//         for (int i = 0; i < size; i++) {
+//             x[i] = exp(x[i] - max);
+//             sum += x[i];
+//         }
+//         for (int i = 0; i < size; i++) {
+//             x[i] /= sum;
+//         }
+//     }
+// }
+
+// __global__ void outputGradientKernel(double* output, double* target, double* d_output, int size) {
+//     int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (idx < size) {
+//         d_output[idx] = output[idx] - target[idx];
+//     }
+// }
+
+// __global__ void hiddenGradientKernel(double* W2, double* d_output, double* hidden, double* d_hidden, int hidden_size, int output_size) {
+//     int i = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (i < hidden_size) {
+//         double sum = 0;
+//         for (int j = 0; j < output_size; j++) {
+//             sum += W2[j * hidden_size + i] * d_output[j];
+//         }
+//         d_hidden[i] = sum * (hidden[i] > 0);
+//     }
+// }
+
+// __global__ void updateWeightsKernel(double* W, double* grad, double* input, int rows, int cols, double lr) {
+//     int i = blockIdx.y * blockDim.y + threadIdx.y;
+//     int j = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (i < rows && j < cols) {
+//         W[i * cols + j] -= lr * grad[i] * input[j];
+//     }
+// }
+
+// __global__ void updateBiasKernel(double* b, double* grad, int size, double lr) {
+//     int i = blockIdx.x * blockDim.x + threadIdx.x;
+//     if (i < size) {
+//         b[i] -= lr * grad[i];
+//     }
+// }
+
+// typedef struct {
+//     double** W1;
+//     double** W2;
+//     double* b1;
+//     double* b2;
+//     double *d_W1, *d_W2, *d_b1, *d_b2;
+// } NeuralNetwork;
+
+// NeuralNetwork* createNetwork() {
+//     NeuralNetwork* net = (NeuralNetwork*)malloc(sizeof(NeuralNetwork));
+//     net->W1 = allocateMatrix(HIDDEN_SIZE, INPUT_SIZE);
+//     net->W2 = allocateMatrix(OUTPUT_SIZE, HIDDEN_SIZE);
+//     net->b1 = (double*)calloc(HIDDEN_SIZE, sizeof(double));
+//     net->b2 = (double*)calloc(OUTPUT_SIZE, sizeof(double));
+
+//     srand(42);
+//     for (int i = 0; i < HIDDEN_SIZE; i++)
+//         for (int j = 0; j < INPUT_SIZE; j++)
+//             net->W1[i][j] = ((double)rand() / RAND_MAX) * 0.01;
+
+//     for (int i = 0; i < OUTPUT_SIZE; i++)
+//         for (int j = 0; j < HIDDEN_SIZE; j++)
+//             net->W2[i][j] = ((double)rand() / RAND_MAX) * 0.01;
+
+//     CUDA_CHECK(cudaMalloc(&net->d_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double)));
+//     CUDA_CHECK(cudaMalloc(&net->d_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double)));
+//     CUDA_CHECK(cudaMalloc(&net->d_b1, HIDDEN_SIZE * sizeof(double)));
+//     CUDA_CHECK(cudaMalloc(&net->d_b2, OUTPUT_SIZE * sizeof(double)));
+
+//     double* temp_W1;
+//     double* temp_W2;
+//     CUDA_CHECK(cudaMallocHost(&temp_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double)));
+//     CUDA_CHECK(cudaMallocHost(&temp_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double)));
+//     for (int i = 0; i < HIDDEN_SIZE; i++)
+//         for (int j = 0; j < INPUT_SIZE; j++)
+//             temp_W1[i * INPUT_SIZE + j] = net->W1[i][j];
+//     for (int i = 0; i < OUTPUT_SIZE; i++)
+//         for (int j = 0; j < HIDDEN_SIZE; j++)
+//             temp_W2[i * HIDDEN_SIZE + j] = net->W2[i][j];
+
+//     CUDA_CHECK(cudaMemcpy(net->d_W1, temp_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice));
+//     CUDA_CHECK(cudaMemcpy(net->d_W2, temp_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice));
+//     CUDA_CHECK(cudaMemcpy(net->d_b1, net->b1, HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice));
+//     CUDA_CHECK(cudaMemcpy(net->d_b2, net->b2, OUTPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice));
+
+//     CUDA_CHECK(cudaFreeHost(temp_W1));
+//     CUDA_CHECK(cudaFreeHost(temp_W2));
+
+//     return net;
+// }
+
+// void forward_cpu(NeuralNetwork* net, double* input, double* hidden, double* output) {
+//     for (int i = 0; i < HIDDEN_SIZE; i++) {
+//         hidden[i] = net->b1[i];
+//         for (int j = 0; j < INPUT_SIZE; j++)
+//             hidden[i] += net->W1[i][j] * input[j];
+//     }
+//     relu_cpu(hidden, HIDDEN_SIZE);
+
+//     for (int i = 0; i < OUTPUT_SIZE; i++) {
+//         output[i] = net->b2[i];
+//         for (int j = 0; j < HIDDEN_SIZE; j++)
+//             output[i] += net->W2[i][j] * hidden[j];
+//     }
+//     softmax_cpu(output, OUTPUT_SIZE);
+// }
+
+// void forward_gpu(NeuralNetwork* net, double* d_input, double* d_hidden, double* d_output, cudaStream_t stream, Config* config) {
+//     dim3 blockDim, gridDim;
+//     computeGridBlockDim(HIDDEN_SIZE, 1, &gridDim, &blockDim, config);
+//     matrixMulKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W1, d_input, d_hidden, net->d_b1, HIDDEN_SIZE, INPUT_SIZE, 1);
+
+//     int blocks, threads;
+//     compute1DGridBlockDim(HIDDEN_SIZE, &blocks, &threads, config);
+//     reluKernel<<<blocks, threads, 0, stream>>>(d_hidden, HIDDEN_SIZE);
+
+//     computeGridBlockDim(OUTPUT_SIZE, 1, &gridDim, &blockDim, config);
+//     matrixMulKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W2, d_hidden, d_output, net->d_b2, OUTPUT_SIZE, HIDDEN_SIZE, 1);
+
+//     compute1DGridBlockDim(OUTPUT_SIZE, &blocks, &threads, config);
+//     softmaxKernel<<<1, 32, 0, stream>>>(d_output, OUTPUT_SIZE);
+// }
+
+// void backward_cpu(NeuralNetwork* net, double* input, double* hidden, double* output, double* target) {
+//     double d_output[OUTPUT_SIZE], d_hidden[HIDDEN_SIZE];
+
+//     for (int i = 0; i < OUTPUT_SIZE; i++)
+//         d_output[i] = output[i] - target[i];
+
+//     for (int i = 0; i < HIDDEN_SIZE; i++) {
+//         d_hidden[i] = 0;
+//         for (int j = 0; j < OUTPUT_SIZE; j++)
+//             d_hidden[i] += net->W2[j][i] * d_output[j];
+//         d_hidden[i] *= (hidden[i] > 0);
+//     }
+
+//     for (int i = 0; i < OUTPUT_SIZE; i++)
+//         for (int j = 0; j < HIDDEN_SIZE; j++)
+//             net->W2[i][j] -= LEARNING_RATE * d_output[i] * hidden[j];
+
+//     for (int i = 0; i < HIDDEN_SIZE; i++)
+//         for (int j = 0; j < INPUT_SIZE; j++)
+//             net->W1[i][j] -= LEARNING_RATE * d_hidden[i] * input[j];
+
+//     for (int i = 0; i < OUTPUT_SIZE; i++)
+//         net->b2[i] -= LEARNING_RATE * d_output[i];
+
+//     for (int i = 0; i < HIDDEN_SIZE; i++)
+//         net->b1[i] -= LEARNING_RATE * d_hidden[i];
+// }
+
+// void backward_gpu(NeuralNetwork* net, double* d_input, double* d_hidden, double* d_output, double* d_target, double* d_d_output, double* d_d_hidden, cudaStream_t stream, Config* config) {
+//     int blocks, threads;
+//     compute1DGridBlockDim(OUTPUT_SIZE, &blocks, &threads, config);
+//     outputGradientKernel<<<blocks, threads, 0, stream>>>(d_output, d_target, d_d_output, OUTPUT_SIZE);
+
+//     compute1DGridBlockDim(HIDDEN_SIZE, &blocks, &threads, config);
+//     hiddenGradientKernel<<<blocks, threads, 0, stream>>>(net->d_W2, d_d_output, d_hidden, d_d_hidden, HIDDEN_SIZE, OUTPUT_SIZE);
+
+//     dim3 blockDim, gridDim;
+//     computeGridBlockDim(OUTPUT_SIZE, HIDDEN_SIZE, &gridDim, &blockDim, config);
+//     updateWeightsKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W2, d_d_output, d_hidden, OUTPUT_SIZE, HIDDEN_SIZE, LEARNING_RATE);
+
+//     computeGridBlockDim(HIDDEN_SIZE, INPUT_SIZE, &gridDim, &blockDim, config);
+//     updateWeightsKernel<<<gridDim, blockDim, 0, stream>>>(net->d_W1, d_d_hidden, d_input, HIDDEN_SIZE, INPUT_SIZE, LEARNING_RATE);
+
+//     compute1DGridBlockDim(OUTPUT_SIZE, &blocks, &threads, config);
+//     updateBiasKernel<<<blocks, threads, 0, stream>>>(net->d_b2, d_d_output, OUTPUT_SIZE, LEARNING_RATE);
+
+//     compute1DGridBlockDim(HIDDEN_SIZE, &blocks, &threads, config);
+//     updateBiasKernel<<<blocks, threads, 0, stream>>>(net->d_b1, d_d_hidden, HIDDEN_SIZE, LEARNING_RATE);
+// }
+
+// void train(NeuralNetwork* net, double** images, double** labels, int numImages, bool use_gpu, double* total_time, double* loss_out, double* train_acc_out, Config* config) {
+//     double loss = 0.0;
+//     int correct = 0;
+
+//     if (use_gpu) {
+//         double *d_hidden, *d_output, *d_d_output, *d_d_hidden;
+//         CUDA_CHECK(cudaMalloc(&d_hidden, HIDDEN_SIZE * sizeof(double)));
+//         CUDA_CHECK(cudaMalloc(&d_output, OUTPUT_SIZE * sizeof(double)));
+//         CUDA_CHECK(cudaMalloc(&d_d_output, OUTPUT_SIZE * sizeof(double)));
+//         CUDA_CHECK(cudaMalloc(&d_d_hidden, HIDDEN_SIZE * sizeof(double)));
+
+//         double *d_batch_images[config->num_streams], *d_batch_labels[config->num_streams], *d_batch_outputs[config->num_streams];
+//         double *h_batch_outputs[config->num_streams];
+//         cudaStream_t streams[config->num_streams];
+//         for (int s = 0; s < config->num_streams; s++) {
+//             CUDA_CHECK(cudaMalloc(&d_batch_images[s], BATCH_SIZE * INPUT_SIZE * sizeof(double)));
+//             CUDA_CHECK(cudaMalloc(&d_batch_labels[s], BATCH_SIZE * OUTPUT_SIZE * sizeof(double)));
+//             CUDA_CHECK(cudaMalloc(&d_batch_outputs[s], BATCH_SIZE * OUTPUT_SIZE * sizeof(double)));
+//             CUDA_CHECK(cudaMallocHost(&h_batch_outputs[s], BATCH_SIZE * OUTPUT_SIZE * sizeof(double)));
+//             CUDA_CHECK(cudaStreamCreate(&streams[s]));
+//         }
+
+//         double* temp_W1;
+//         double* temp_W2;
+//         CUDA_CHECK(cudaMallocHost(&temp_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double)));
+//         CUDA_CHECK(cudaMallocHost(&temp_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double)));
+
+//         cudaEvent_t start, stop;
+//         CUDA_CHECK(cudaEventCreate(&start));
+//         CUDA_CHECK(cudaEventCreate(&stop));
+//         CUDA_CHECK(cudaEventRecord(start));
+
+//         for (int epoch = 0; epoch < EPOCHS; epoch++) {
+//             loss = 0.0;
+//             correct = 0;
+
+//             for (int i = 0; i < numImages; i += BATCH_SIZE) {
+//                 int stream_idx = (i / BATCH_SIZE) % config->num_streams;
+//                 cudaStream_t stream = streams[stream_idx];
+//                 int batch_size = (i + BATCH_SIZE <= numImages) ? BATCH_SIZE : numImages - i;
+
+//                 for (int b = 0; b < batch_size; b++) {
+//                     int img_idx = i + b;
+//                     CUDA_CHECK(cudaMemcpyAsync(d_batch_images[stream_idx] + b * INPUT_SIZE, images[img_idx],
+//                                                INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice, stream));
+//                     CUDA_CHECK(cudaMemcpyAsync(d_batch_labels[stream_idx] + b * OUTPUT_SIZE, labels[img_idx],
+//                                                OUTPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice, stream));
+//                 }
+
+//                 for (int b = 0; b < batch_size; b++) {
+//                     double* d_input = d_batch_images[stream_idx] + b * INPUT_SIZE;
+//                     double* d_target = d_batch_labels[stream_idx] + b * OUTPUT_SIZE;
+//                     double* d_batch_output = d_batch_outputs[stream_idx] + b * OUTPUT_SIZE;
+
+//                     forward_gpu(net, d_input, d_hidden, d_output, stream, config);
+//                     backward_gpu(net, d_input, d_hidden, d_output, d_target, d_d_output, d_d_hidden, stream, config);
+
+//                     CUDA_CHECK(cudaMemcpyAsync(d_batch_output, d_output, OUTPUT_SIZE * sizeof(double),
+//                                                cudaMemcpyDeviceToDevice, stream));
+//                 }
+
+//                 CUDA_CHECK(cudaMemcpyAsync(h_batch_outputs[stream_idx], d_batch_outputs[stream_idx],
+//                                            batch_size * OUTPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost, stream));
+
+//                 CUDA_CHECK(cudaStreamSynchronize(stream));
+
+//                 for (int b = 0; b < batch_size; b++) {
+//                     int img_idx = i + b;
+//                     for (int k = 0; k < OUTPUT_SIZE; k++) {
+//                         loss -= labels[img_idx][k] * log(h_batch_outputs[stream_idx][b * OUTPUT_SIZE + k] + 1e-10);
+//                     }
+//                     int pred = 0, actual = 0;
+//                     for (int j = 0; j < OUTPUT_SIZE; j++) {
+//                         if (h_batch_outputs[stream_idx][b * OUTPUT_SIZE + j] > h_batch_outputs[stream_idx][b * OUTPUT_SIZE + pred]) pred = j;
+//                         if (labels[img_idx][j] > labels[img_idx][actual]) actual = j;
+//                     }
+//                     if (pred == actual) correct++;
+//                 }
+//             }
+
+//             printf("GPU Epoch %d - Loss: %.4f - Train Accuracy: %.2f%%\n",
+//                    epoch + 1, loss / numImages, (correct / (double)numImages) * 100);
+//             if (epoch == EPOCHS - 1) {
+//                 *loss_out = loss / numImages;
+//                 *train_acc_out = (correct / (double)numImages) * 100;
+//             }
+//         }
+
+//         CUDA_CHECK(cudaMemcpy(temp_W1, net->d_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost));
+//         CUDA_CHECK(cudaMemcpy(temp_W2, net->d_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double), cudaMemcpyDeviceToHost));
+//         CUDA_CHECK(cudaMemcpy(net->b1, net->d_b1, HIDDEN_SIZE * sizeof(double), cudaMemcpyDeviceToHost));
+//         CUDA_CHECK(cudaMemcpy(net->b2, net->d_b2, OUTPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost));
+
+//         CUDA_CHECK(cudaEventRecord(stop));
+//         CUDA_CHECK(cudaEventSynchronize(stop));
+//         *total_time = get_gpu_time(start, stop);
+
+//         CUDA_CHECK(cudaEventDestroy(start));
+//         CUDA_CHECK(cudaEventDestroy(stop));
+
+//         for (int i = 0; i < HIDDEN_SIZE; i++)
+//             for (int j = 0; j < INPUT_SIZE; j++)
+//                 net->W1[i][j] = temp_W1[i * INPUT_SIZE + j];
+//         for (int i = 0; i < OUTPUT_SIZE; i++)
+//             for (int j = 0; j < HIDDEN_SIZE; j++)
+//                 net->W2[i][j] = temp_W2[i * HIDDEN_SIZE + j];
+
+//         CUDA_CHECK(cudaFreeHost(temp_W1));
+//         CUDA_CHECK(cudaFreeHost(temp_W2));
+//         for (int s = 0; s < config->num_streams; s++) {
+//             CUDA_CHECK(cudaFreeHost(h_batch_outputs[s]));
+//             CUDA_CHECK(cudaFree(d_batch_images[s]));
+//             CUDA_CHECK(cudaFree(d_batch_labels[s]));
+//             CUDA_CHECK(cudaFree(d_batch_outputs[s]));
+//             CUDA_CHECK(cudaStreamDestroy(streams[s]));
+//         }
+//         CUDA_CHECK(cudaFree(d_hidden));
+//         CUDA_CHECK(cudaFree(d_output));
+//         CUDA_CHECK(cudaFree(d_d_output));
+//         CUDA_CHECK(cudaFree(d_d_hidden));
+//     } else {
+//         clock_t total_start = clock();
+
+//         for (int epoch = 0; epoch < EPOCHS; epoch++) {
+//             loss = 0.0;
+//             correct = 0;
+
+//             for (int i = 0; i < numImages; i++) {
+//                 double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
+//                 forward_cpu(net, images[i], hidden, output);
+//                 backward_cpu(net, images[i], hidden, output, labels[i]);
+
+//                 for (int k = 0; k < OUTPUT_SIZE; k++) {
+//                     loss -= labels[i][k] * log(output[k] + 1e-10);
+//                 }
+//                 int pred = 0, actual = 0;
+//                 for (int j = 0; j < OUTPUT_SIZE; j++) {
+//                     if (output[j] > output[pred]) pred = j;
+//                     if (labels[i][j] > labels[i][actual]) actual = j;
+//                 }
+//                 if (pred == actual) correct++;
+//             }
+
+//             printf("CPU Epoch %d - Loss: %.4f - Train Accuracy: %.2f%%\n",
+//                    epoch + 1, loss / numImages, (correct / (double)numImages) * 100);
+//             if (epoch == EPOCHS - 1) {
+//                 *loss_out = loss / numImages;
+//                 *train_acc_out = (correct / (double)numImages) * 100;
+//             }
+//         }
+
+//         *total_time = get_cpu_time(total_start);
+//         printf("CPU Total training time: %.3fs\n", *total_time);
+//     }
+// }
+
+// void evaluate(NeuralNetwork* net, double** images, double** labels, int numImages, bool use_gpu, double* test_acc_out, Config* config) {
+//     int correct = 0;
+//     if (use_gpu) {
+//         double *d_hidden, *d_output;
+//         CUDA_CHECK(cudaMalloc(&d_hidden, HIDDEN_SIZE * sizeof(double)));
+//         CUDA_CHECK(cudaMalloc(&d_output, OUTPUT_SIZE * sizeof(double)));
+
+//         double *h_batch_images[config->num_streams], *h_batch_outputs[config->num_streams];
+//         double *d_batch_images[config->num_streams], *d_batch_outputs[config->num_streams];
+//         cudaStream_t streams[config->num_streams];
+//         for (int s = 0; s < config->num_streams; s++) {
+//             CUDA_CHECK(cudaMallocHost(&h_batch_images[s], BATCH_SIZE * INPUT_SIZE * sizeof(double)));
+//             CUDA_CHECK(cudaMallocHost(&h_batch_outputs[s], BATCH_SIZE * OUTPUT_SIZE * sizeof(double)));
+//             CUDA_CHECK(cudaMalloc(&d_batch_images[s], BATCH_SIZE * INPUT_SIZE * sizeof(double)));
+//             CUDA_CHECK(cudaMalloc(&d_batch_outputs[s], BATCH_SIZE * OUTPUT_SIZE * sizeof(double)));
+//             CUDA_CHECK(cudaStreamCreate(&streams[s]));
+//         }
+
+//         for (int i = 0; i < numImages; i += BATCH_SIZE) {
+//             int stream_idx = (i / BATCH_SIZE) % config->num_streams;
+//             cudaStream_t stream = streams[stream_idx];
+//             int batch_size = (i + BATCH_SIZE <= numImages) ? BATCH_SIZE : numImages - i;
+
+//             for (int b = 0; b < batch_size; b++) {
+//                 int img_idx = i + b;
+//                 for (int j = 0; j < INPUT_SIZE; j++) {
+//                     h_batch_images[stream_idx][b * INPUT_SIZE + j] = images[img_idx][j];
+//                 }
+//             }
+
+//             CUDA_CHECK(cudaMemcpyAsync(d_batch_images[stream_idx], h_batch_images[stream_idx],
+//                                        batch_size * INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice, stream));
+
+//             for (int b = 0; b < batch_size; b++) {
+//                 double* d_input = d_batch_images[stream_idx] + b * INPUT_SIZE;
+//                 double* d_batch_output = d_batch_outputs[stream_idx] + b * OUTPUT_SIZE;
+
+//                 forward_gpu(net, d_input, d_hidden, d_output, stream, config);
+
+//                 CUDA_CHECK(cudaMemcpyAsync(d_batch_output, d_output, OUTPUT_SIZE * sizeof(double),
+//                                            cudaMemcpyDeviceToDevice, stream));
+//             }
+
+//             CUDA_CHECK(cudaMemcpyAsync(h_batch_outputs[stream_idx], d_batch_outputs[stream_idx],
+//                                        batch_size * OUTPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost, stream));
+
+//             CUDA_CHECK(cudaStreamSynchronize(stream));
+
+//             for (int b = 0; b < batch_size; b++) {
+//                 int img_idx = i + b;
+//                 int pred = 0, actual = 0;
+//                 for (int j = 0; j < OUTPUT_SIZE; j++) {
+//                     if (h_batch_outputs[stream_idx][b * OUTPUT_SIZE + j] > h_batch_outputs[stream_idx][b * OUTPUT_SIZE + pred]) pred = j;
+//                     if (labels[img_idx][j] > labels[img_idx][actual]) actual = j;
+//                 }
+//                 if (pred == actual) correct++;
+//             }
+//         }
+
+//         for (int s = 0; s < config->num_streams; s++) {
+//             CUDA_CHECK(cudaFreeHost(h_batch_images[s]));
+//             CUDA_CHECK(cudaFreeHost(h_batch_outputs[s]));
+//             CUDA_CHECK(cudaFree(d_batch_images[s]));
+//             CUDA_CHECK(cudaFree(d_batch_outputs[s]));
+//             CUDA_CHECK(cudaStreamDestroy(streams[s]));
+//         }
+//         CUDA_CHECK(cudaFree(d_hidden));
+//         CUDA_CHECK(cudaFree(d_output));
+//     } else {
+//         for (int i = 0; i < numImages; i++) {
+//             double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
+//             forward_cpu(net, images[i], hidden, output);
+//             int pred = 0, actual = 0;
+//             for (int j = 0; j < OUTPUT_SIZE; j++) {
+//                 if (output[j] > output[pred]) pred = j;
+//                 if (labels[i][j] > labels[i][actual]) actual = j;
+//             }
+//             if (pred == actual) correct++;
+//         }
+//     }
+//     *test_acc_out = (correct / (double)numImages) * 100;
+//     printf("%s Test Accuracy: %.2f%%\n", use_gpu ? "GPU" : "CPU", *test_acc_out);
+// }
+
+// double** loadMNISTImages(const char* filename, int numImages) {
+//     FILE* file = fopen(filename, "rb");
+//     if (!file) {
+//         printf("Error opening %s\n", filename);
+//         exit(1);
+//     }
+//     fseek(file, 16, SEEK_SET);
+//     double** images = allocateMatrix(numImages, INPUT_SIZE);
+//     for (int i = 0; i < numImages; i++) {
+//         for (int j = 0; j < INPUT_SIZE; j++) {
+//             unsigned char pixel;
+//             if (fread(&pixel, sizeof(unsigned char), 1, file) != 1) {
+//                 fprintf(stderr, "Error: Failed to read pixel\n");
+//                 fclose(file);
+//                 exit(EXIT_FAILURE);
+//             }
+//             images[i][j] = pixel / 255.0;
+//         }
+//     }
+//     fclose(file);
+//     return images;
+// }
+
+// double** loadMNISTLabels(const char* filename, int numLabels) {
+//     FILE* file = fopen(filename, "rb");
+//     if (!file) {
+//         printf("Error opening %s\n", filename);
+//         exit(1);
+//     }
+//     fseek(file, 8, SEEK_SET);
+//     double** labels = allocateMatrix(numLabels, OUTPUT_SIZE);
+//     for (int i = 0; i < numLabels; i++) {
+//         unsigned char label;
+//         if (fread(&label, sizeof(unsigned char), 1, file) != 1) {
+//             fprintf(stderr, "Error: Failed to read label\n");
+//             fclose(file);
+//             exit(EXIT_FAILURE);
+//         }
+//         for (int j = 0; j < OUTPUT_SIZE; j++) {
+//             labels[i][j] = (j == label) ? 1.0 : 0.0;
+//         }
+//     }
+//     fclose(file);
+//     return labels;
+// }
+
+// void freeNetwork(NeuralNetwork* net) {
+//     freeMatrix(net->W1, HIDDEN_SIZE);
+//     freeMatrix(net->W2, OUTPUT_SIZE);
+//     free(net->b1);
+//     free(net->b2);
+//     CUDA_CHECK(cudaFree(net->d_W1));
+//     CUDA_CHECK(cudaFree(net->d_W2));
+//     CUDA_CHECK(cudaFree(net->d_b1));
+//     CUDA_CHECK(cudaFree(net->d_b2));
+//     free(net);
+// }
+
+// int main() {
+//     printf("MNIST Neural Network - Dynamic Launch Configuration\n\n");
+
+//     // Print applied optimization
+//     printf("=== Applied Optimization ===\n");
+//     printf("1. Dynamic Launch Configuration: Block and grid dimensions are computed dynamically using configurable block sizes (1D: %d threads, 2D: %dx%d) to optimize kernel launches for different input sizes and GPU architectures.\n",
+//            config.block_size_1d, config.block_size_2d_x, config.block_size_2d_y);
+//     printf("1. Pinned Host Memory: Used cudaMallocHost for host-side allocations (temp_W1, temp_W2) to enable faster device to host memory transfers.\n");
+//     printf("2. Reused Allocated Memory: Allocated d_hidden, d_output, d_d_output, and d_d_hidden once at the start of training and evaluation, reusing them across iterations and epochs, and freeing them only when complete.\n");
+//     printf("3. Asynchronous Transfers with Variable Streams: Used %d CUDA streams to overlap data transfers (batch images, labels, and outputs) with computation, processing one batch while transferring another.\n", config.num_streams);
+//     printf("\n");
+
+//     double** train_images = loadMNISTImages("data/train-images-idx3-ubyte/train-images-idx3-ubyte", 60000);
+//     double** train_labels = loadMNISTLabels("data/train-labels-idx1-ubyte/train-labels-idx1-ubyte", 60000);
+//     double** test_images = loadMNISTImages("data/t10k-images-idx3-ubyte/t10k-images-idx3-ubyte", 10000);
+//     double** test_labels = loadMNISTLabels("data/t10k-labels-idx1-ubyte/t10k-labels-idx1-ubyte", 10000);
+
+//     NeuralNetwork* net_cpu = createNetwork();
+//     double cpu_total_time, cpu_loss, cpu_train_acc, cpu_test_acc;
+//     printf("Running CPU implementation...\n");
+//     train(net_cpu, train_images, train_labels, 60000, false, &cpu_total_time, &cpu_loss, &cpu_train_acc, &config);
+//     evaluate(net_cpu, test_images, test_labels, 10000, false, &cpu_test_acc, &config);
+
+//     NeuralNetwork* net_gpu = createNetwork();
+//     double gpu_total_time, gpu_loss, gpu_train_acc, gpu_test_acc;
+//     printf("\nRunning GPU implementation...\n");
+//     train(net_gpu, train_images, train_labels, 60000, true, &gpu_total_time, &gpu_loss, &gpu_train_acc, &config);
+//     evaluate(net_gpu, test_images, test_labels, 10000, true, &gpu_test_acc, &config);
+
+//     printf("\n=== Result Comparison ===\n");
+//     printf("CPU Total Time: %.3fs\n", cpu_total_time);
+//     printf("GPU Total Time: %.3fs\n", gpu_total_time);
+//     printf("Speedup: %.2fx\n", cpu_total_time / gpu_total_time);
+//     printf("CPU Loss: %.4f\n", cpu_loss);
+//     printf("GPU Loss: %.4f\n", gpu_loss);
+//     printf("Loss Difference: %.6f\n", fabs(cpu_loss - gpu_loss));
+//     printf("CPU Train Accuracy: %.2f%%\n", cpu_train_acc);
+//     printf("GPU Train Accuracy: %.2f%%\n", gpu_train_acc);
+//     printf("Train Accuracy Difference: %.2f%%\n", fabs(cpu_train_acc - gpu_train_acc));
+//     printf("CPU Test Accuracy: %.2f%%\n", cpu_test_acc);
+//     printf("GPU Test Accuracy: %.2f%%\n", gpu_test_acc);
+//     printf("Test Accuracy Difference: %.2f%%\n", fabs(cpu_test_acc - gpu_test_acc));
+
+//     freeNetwork(net_cpu);
+//     freeNetwork(net_gpu);
+//     freeMatrix(train_images, 60000);
+//     freeMatrix(train_labels, 60000);
+//     freeMatrix(test_images, 10000);
+//     freeMatrix(test_labels, 10000);
+
+//     return 0;
+// }
