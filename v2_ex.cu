@@ -9,7 +9,7 @@
 #define OUTPUT_SIZE 10
 #define LEARNING_RATE 0.01
 #define EPOCHS 3
-#define BATCH_SIZE 1 // Naive single-image processing
+#define BATCH_SIZE 1 // Naive single image processing
 #define NUM_CLASSES 10
 #define THREADS_PER_BLOCK 256
 
@@ -54,6 +54,7 @@ typedef struct {
     double* b1;
     double* b2;
 } NeuralNetworkV1;
+
 
 // V1 Activation functions
 void relu_v1(double* x, int size) {
