@@ -1,9 +1,8 @@
 // #include <stdio.h>
-// #include <stdlib.h>
 // #include <math.h>
 // #include <time.h>
 // #include <cuda_runtime.h>
-
+// #include <stdlib>
 // #define INPUT_SIZE 784
 // #define HIDDEN_SIZE 128
 // #define OUTPUT_SIZE 10
