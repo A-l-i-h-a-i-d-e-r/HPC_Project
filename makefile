@@ -21,7 +21,7 @@ CFLAGS = -Wall -O2 -pg
 LDFLAGS = -lm -pg
 
 EXE = nn.exe
-SRC = nn.c
+SRC = v1.c
 PROF_TXT = gprof_canny.txt
 DOT_FILE = callgraph.dot
 PNG_FILE = callgraph.png
